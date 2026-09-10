@@ -705,7 +705,34 @@ class TestRunAction:
 
 @pytest.mark.asyncio
 class TestDashboard:
-    async def test_panel_shows_active_full_and_others_mini(self, tmp_path):
+    async def test_panel_shows_full_cards_for_every_account(self, tmp_path):
+        fake = FakeSwitcher(
+            [
+                make_account(1, active=True, entry=make_entry(47.0, 63.0)),
+                make_account(
+                    2, entry=make_entry(92.0, 71.0, scoped=[("Fable", 54.0)])
+                ),
+            ],
+            tmp_path,
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            from claude_swap.tui.widgets import AccountsPanel
+
+            panel = app.screen.query_one(AccountsPanel).render().plain
+            assert "user1@example.com" in panel and panel.count("● active") == 1
+            # the inactive account is a full card too: bars, a reset time on
+            # every row, and its per-model row — not a one-line summary
+            other = panel.split("user2@example.com", 1)[1]
+            assert "━" in other and "92%" in other and "71%" in other
+            assert other.count("resets") == 3
+            assert "Fable" in other and "54%" in other
+
+    async def test_panel_minis_when_inactive_cards_is_mini(self, tmp_path):
+        (tmp_path / "settings.json").write_text(
+            json.dumps({"schemaVersion": 1, "ui": {"inactiveCards": "mini"}})
+        )
         fake = FakeSwitcher(
             [
                 make_account(1, active=True, entry=make_entry(47.0, 63.0)),
@@ -720,7 +747,7 @@ class TestDashboard:
 
             panel = app.screen.query_one(AccountsPanel).render().plain
             assert "user1@example.com" in panel and "● active" in panel
-            assert "resets" in panel  # the active card is the full one
+            assert "resets" in panel  # the active card is still the full one
             assert "user2@example.com" in panel and "92%" in panel
             # the mini line has no bars — bar glyphs only in the active card
             mini_part = panel.split("user2@example.com", 1)[1]
@@ -770,6 +797,9 @@ class TestDashboard:
             assert "Fable" in panel and "62%" in panel
 
     async def test_mini_line_skips_absent_window(self, tmp_path):
+        (tmp_path / "settings.json").write_text(
+            json.dumps({"schemaVersion": 1, "ui": {"inactiveCards": "mini"}})
+        )
         fake = FakeSwitcher(
             [
                 make_account(1, active=True),
@@ -1367,6 +1397,75 @@ class TestAutoScreen:
             assert len(fake_engine.instances) == 2
             assert fake_engine.instances[0].stopped is True
             assert fake_engine.instances[1].dry_run is False
+            # the confirmed choice is saved so the view reopens live...
+            from claude_swap.settings import load_ui_settings
+
+            assert load_ui_settings(tmp_path).auto_live is True
+            # ...and toggling back to dry-run saves that too
+            await pilot.press("l")
+            await settle(pilot)
+            assert fake_engine.instances[2].dry_run is True
+            assert load_ui_settings(tmp_path).auto_live is False
+
+    async def test_opens_live_when_saved(self, tmp_path, fake_engine):
+        (tmp_path / "settings.json").write_text(
+            json.dumps({"schemaVersion": 1, "ui": {"autoLive": True}})
+        )
+        fake = FakeSwitcher(
+            [make_account(1, active=True), make_account(2)], tmp_path
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await self._open(pilot)
+            assert fake_engine.instances[0].dry_run is False
+            from textual.widgets import Static
+
+            badge = app.screen.query_one("#mode-badge", Static)
+            assert badge.render().plain.strip() == "LIVE"
+
+    async def test_model_limit_cycles_saves_and_restarts_engine(
+        self, tmp_path, fake_engine
+    ):
+        fake = FakeSwitcher(
+            [
+                make_account(
+                    1, active=True, entry=make_entry(scoped=[("Fable", 54.0)])
+                ),
+                make_account(2, entry=make_entry(scoped=[("Fable", 96.0)])),
+            ],
+            tmp_path,
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await self._open(pilot)
+            await settle(pilot)
+            screen = app.screen
+            from textual.widgets import Static
+
+            summary = screen.query_one("#auto-summary", Static)
+            assert "model limit off" in summary.render().plain
+            # off → Fable (the per-model window the accounts report)
+            await pilot.press("m")
+            await settle(pilot)
+            assert screen._settings.model == "Fable"
+            assert "model limit Fable" in summary.render().plain
+            raw = json.loads((tmp_path / "settings.json").read_text())
+            assert raw["autoswitch"]["model"] == "Fable"
+            # the engine's model axes are fixed at construction: restarted,
+            # same mode, on the new settings
+            assert fake_engine.instances[0].stopped is True
+            assert fake_engine.instances[1].settings.model == "Fable"
+            assert fake_engine.instances[1].dry_run is True
+            # Fable → all → off (the key is removed again)
+            await pilot.press("m")
+            await settle(pilot)
+            assert screen._settings.model == "all"
+            await pilot.press("m")
+            await settle(pilot)
+            assert screen._settings.model is None
+            raw = json.loads((tmp_path / "settings.json").read_text())
+            assert "model" not in raw.get("autoswitch", {})
+            assert "model limit off" in summary.render().plain
 
     async def test_back_stops_engine_and_restores_fetching(
         self, tmp_path, fake_engine
@@ -1385,7 +1484,7 @@ class TestAutoScreen:
             assert fake_engine.instances[0].stopped is True
             assert app._store_only is False
 
-    async def test_threshold_adjust_is_session_only(self, tmp_path, fake_engine):
+    async def test_threshold_adjust_persists_on_done(self, tmp_path, fake_engine):
         fake = FakeSwitcher(
             [make_account(1, active=True), make_account(2)], tmp_path
         )
@@ -1406,12 +1505,23 @@ class TestAutoScreen:
             from textual.widgets import Static
 
             summary = screen.query_one("#auto-summary", Static)
+            # unsaved while still adjusting
             assert "threshold 93% (session)" in summary.render().plain
             await pilot.press("enter")
             await pilot.pause()
             assert engine.wakes == 1  # one forced tick on leaving the mode
-            # the override lives in memory only — nothing was persisted
-            assert not (tmp_path / "settings.json").exists()
+            # Done saves the value: settings.json carries it and the
+            # "(session)" marker is gone
+            raw = json.loads((tmp_path / "settings.json").read_text())
+            assert raw["autoswitch"]["threshold"] == 93.0
+            plain = summary.render().plain
+            assert "threshold 93%" in plain and "(session)" not in plain
+            from textual.widgets import RichLog
+
+            log_text = "\n".join(
+                strip.text for strip in screen.query_one("#event-log", RichLog).lines
+            )
+            assert "threshold set to 93% (saved)" in log_text
             # a dry↔live restart rebuilds the engine from the adjusted copy
             await pilot.press("l")
             await pilot.pause()
@@ -1420,8 +1530,8 @@ class TestAutoScreen:
             assert fake_engine.instances[1].settings.threshold == 93.0
             await pilot.press("escape")
             await settle(pilot)
-            # leaving the screen reverts the tick and unpins poll planning
-            assert app.threshold_pct == 90.0
+            # leaving the screen keeps the saved tick and unpins poll planning
+            assert app.threshold_pct == 93.0
             assert fake._poll_inputs_override is None
 
     async def test_threshold_adjust_escape_exits_mode_not_screen(

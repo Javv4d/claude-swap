@@ -151,6 +151,36 @@ class TestUiSettings:
         with pytest.raises(ConfigError, match="dark, light"):
             set_setting(tmp_path, "ui.theme", "purple")
 
+    def test_reads_auto_live_and_inactive_cards(self, tmp_path: Path):
+        settings_path(tmp_path).write_text(
+            json.dumps({"ui": {"autoLive": True, "inactiveCards": "mini"}})
+        )
+        assert load_ui_settings(tmp_path) == UiSettings(
+            theme="auto", auto_live=True, inactive_cards="mini"
+        )
+
+    def test_bad_ui_values_fall_back_per_key(self, tmp_path: Path):
+        # One bad value must not reset the good ones beside it.
+        settings_path(tmp_path).write_text(json.dumps({
+            "ui": {"theme": "light", "autoLive": "yes", "inactiveCards": "huge"},
+        }))
+        assert load_ui_settings(tmp_path) == UiSettings(
+            theme="light", auto_live=False, inactive_cards="full"
+        )
+
+    def test_set_and_unset_auto_live(self, tmp_path: Path):
+        assert set_setting(tmp_path, "ui.autoLive", "true") is True
+        raw = json.loads(settings_path(tmp_path).read_text())
+        assert raw == {"schemaVersion": 1, "ui": {"autoLive": True}}
+        assert load_ui_settings(tmp_path).auto_live is True
+        assert unset_setting(tmp_path, "ui.autoLive") is True
+        assert load_ui_settings(tmp_path).auto_live is False
+
+    def test_set_inactive_cards_validates_choice(self, tmp_path: Path):
+        assert set_setting(tmp_path, "ui.inactiveCards", "mini") == "mini"
+        with pytest.raises(ConfigError, match="full, mini"):
+            set_setting(tmp_path, "ui.inactiveCards", "huge")
+
 
 class TestSettingSpecs:
     def test_registry_covers_every_dataclass_field(self):

@@ -307,13 +307,15 @@ def mini_account_text(
 
 
 class AccountsPanel(Static):
-    """Static account overview: the active account full-size, others as
-    one-line minis (in slot order, expanded in place). The dashboard's — and
-    with ``show_minis=False`` the auto screen's — always-visible monitor."""
+    """Static account overview, in slot order: every account as a full card
+    (bars, reset times, per-model rows) with the active one marked — or, with
+    ``ui.inactiveCards = mini``, the inactive ones as one-line minis. The
+    dashboard's — and with ``show_inactive=False`` the auto screen's (active
+    account only) — always-visible monitor."""
 
-    def __init__(self, *, show_minis: bool = True, id: str | None = None) -> None:
+    def __init__(self, *, show_inactive: bool = True, id: str | None = None) -> None:
         super().__init__(id=id)
-        self._show_minis = show_minis
+        self._show_inactive = show_inactive
 
     def on_mount(self) -> None:
         self.watch(self.app, "snapshot", lambda _snap: self.refresh(layout=True))
@@ -335,15 +337,18 @@ class AccountsPanel(Static):
         now = time.time()
         width = (self.size.width or 80) - 2
         blocks: list[Text] = []
+        minis = getattr(app, "inactive_cards", "full") == "mini"
         for acc in snap.accounts:
-            if acc.is_active:
+            if not acc.is_active and not self._show_inactive:
+                continue
+            if acc.is_active or not minis:
                 blocks.append(
                     account_card_text(
                         acc, width, threshold=app.threshold_pct, now=now,
                         palette=palette,
                     )
                 )
-            elif self._show_minis:
+            else:
                 blocks.append(mini_account_text(acc, now, palette=palette))
         if not blocks:
             return Text("no active managed login", style=palette.muted)
@@ -352,7 +357,7 @@ class AccountsPanel(Static):
         for i, block in enumerate(blocks):
             multiline = "\n" in block.plain
             if i:
-                # breathe around the expanded active card
+                # breathe around expanded cards
                 text.append("\n\n" if (multiline or previous_multiline) else "\n")
             text.append(block)
             previous_multiline = multiline

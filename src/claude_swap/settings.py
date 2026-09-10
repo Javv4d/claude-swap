@@ -61,10 +61,20 @@ class AutoSwitchSettings:
 
 @dataclass(frozen=True)
 class UiSettings:
-    """Appearance preferences (``ui`` section). ``theme`` selects the TUI/CLI
-    color theme; ``auto`` follows terminal-background detection."""
+    """Appearance and TUI behavior preferences (``ui`` section).
+
+    ``theme`` selects the TUI/CLI color theme; ``auto`` follows terminal-
+    background detection. ``auto_live`` makes the TUI's auto-switch view open
+    live (switching) instead of dry-run — the view sets it once the user has
+    confirmed going live, so a reopen keeps that choice. ``inactive_cards``
+    picks how the dashboard draws accounts other than the active login:
+    ``full`` (every window as a bar with its reset time, same as the active
+    card) or ``mini`` (one line of percentages).
+    """
 
     theme: str = "auto"
+    auto_live: bool = False
+    inactive_cards: str = "full"
 
 
 _SECTION_DEFAULT_SOURCES = {"autoswitch": AutoSwitchSettings, "ui": UiSettings}
@@ -138,6 +148,14 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         SettingSpec(
             "ui", "theme", "theme", "choice", choices=("dark", "light", "auto"),
             help="Color theme; auto follows the terminal background",
+        ),
+        SettingSpec(
+            "ui", "autoLive", "auto_live", "bool",
+            help="TUI auto-switch view opens live (switching) instead of dry-run",
+        ),
+        SettingSpec(
+            "ui", "inactiveCards", "inactive_cards", "choice", choices=("full", "mini"),
+            help="Dashboard rows for non-active accounts: full cards or one-line minis",
         ),
     )
 }
@@ -232,20 +250,31 @@ def load_settings(backup_root: Path) -> AutoSwitchSettings:
 
 
 def load_ui_settings(backup_root: Path) -> UiSettings:
-    """Load the ui section; missing/corrupt file or unknown theme → default."""
+    """Load the ui section; a missing/corrupt file or a bad value → the
+    default, per key (one bad value never resets the others)."""
     raw = _read_raw(settings_path(backup_root))
     section = raw.get("ui")
-    default = UiSettings()
     if not isinstance(section, dict):
-        return default
-    theme = section.get("theme", default.theme)
-    if theme not in SETTING_SPECS["ui.theme"].choices:
-        _logger.warning(
-            "settings.json: unsupported ui.theme %r; using %r",
-            theme, default.theme,
-        )
-        return default
-    return UiSettings(theme=theme)
+        return UiSettings()
+    kwargs = {}
+    for spec in SETTING_SPECS.values():
+        if spec.section != "ui" or spec.json_key not in section:
+            continue
+        value = section[spec.json_key]
+        if spec.kind == "choice" and value not in spec.choices:
+            _logger.warning(
+                "settings.json: unsupported %s %r; using %r",
+                spec.dotted, value, spec.default,
+            )
+            continue
+        if spec.kind == "bool" and not isinstance(value, bool):
+            _logger.warning(
+                "settings.json: %s expects true/false, got %r; using %r",
+                spec.dotted, value, spec.default,
+            )
+            continue
+        kwargs[spec.field] = value
+    return UiSettings(**kwargs)
 
 
 def save_settings(backup_root: Path, settings: AutoSwitchSettings) -> None:

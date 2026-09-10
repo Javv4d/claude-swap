@@ -166,6 +166,8 @@ Subfolders inherit the nearest mapped ancestor. In an unmapped directory, `cswap
 
 Run `cswap` on its own (or `cswap tui`) for the full-screen dashboard: live usage for every account, switching, and the auto-switcher, all keyboard-driven. `cswap watch` opens it straight to the live monitor. Works on macOS, Linux, and Windows.
 
+The dashboard shows every account as a full card — bars, reset times, and per-model rows — with the active one marked (`cswap config set ui.inactiveCards mini` collapses the others to one line). In the auto-switch view, `t` sets the threshold, `m` cycles the per-model limit (off → Fable → all), and `l` goes live; all three are saved, so the view reopens the way you left it. The engine in that view runs only while the view is open — for always-on switching use `cswap auto` or the menu bar.
+
 <img src="assets/tui-watch.png" width="760" alt="cswap watch — live 5h/7d usage bars for every account, with reset times and the active account marked">
 
 ### Refresh expired tokens
@@ -274,6 +276,7 @@ cswap config                              # list effective settings ("(default)"
 cswap config get autoswitch.threshold
 cswap config set autoswitch.threshold 80  # validated: rejects out-of-range values loudly
 cswap config set autoswitch.model Fable   # per-model switching (see "auto"); Fable,Opus for several
+cswap config set ui.inactiveCards mini    # dashboard: one-line rows for non-active accounts
 cswap config unset autoswitch.threshold   # back to the default
 cswap config path                         # where settings.json lives
 ```

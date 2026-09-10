@@ -1,10 +1,13 @@
 """Live auto-switch screen: the real engine, visualized.
 
 Runs :class:`AutoSwitchEngine` in a thread worker and renders its typed
-events. Opens in **dry-run** — opening a view must never start switching
-accounts on its own; going live is an explicit, confirmed action. The
-engine's own state file semantics (shared cooldown, quarantine list, state
-lock) make it safe to run alongside an external ``cswap auto``.
+events. Opens in **dry-run** unless the user went live here before and that
+choice was saved (``ui.autoLive``) — going live is an explicit, confirmed
+action, and the confirmation is what persists it. The threshold (``t``) and
+the per-model limit (``m``, e.g. Fable's weekly window) are saved to
+settings.json too, so what this view shows is what ``cswap auto`` runs with.
+The engine's own state file semantics (shared cooldown, quarantine list,
+state lock) make it safe to run alongside an external ``cswap auto``.
 
 The active account's full card sits on top (same widget as the dashboard's
 panel, with the threshold tick); this screen adds the engine badge, the
@@ -30,8 +33,17 @@ from claude_swap.autoswitch import (
     binding_pct,
     pct_label,
 )
+from claude_swap.exceptions import ConfigError
 from claude_swap.models import AccountsSnapshot
-from claude_swap.settings import SETTING_SPECS, load_settings, parse_model_names
+from claude_swap.settings import (
+    SETTING_SPECS,
+    format_setting_value,
+    load_settings,
+    load_ui_settings,
+    parse_model_names,
+    set_setting,
+    unset_setting,
+)
 from claude_swap.tui import data
 from claude_swap.tui.modals import ConfirmModal
 from claude_swap.tui.theme import Palette
@@ -66,6 +78,7 @@ class AutoScreen(Screen):
     BINDINGS = [
         Binding("l", "toggle_live", "Go live / dry-run"),
         Binding("t", "adjust_threshold", "Threshold"),
+        Binding("m", "cycle_model", "Model limit"),
         Binding("left", "threshold_step(-1)", "-1%"),
         Binding("right", "threshold_step(1)", "+1%"),
         Binding("enter", "adjust_done", "Done"),
@@ -78,17 +91,18 @@ class AutoScreen(Screen):
         super().__init__()
         self._engine: AutoSwitchEngine | None = None
         self._settings = None
-        # Session-only threshold adjustment (t, then arrows). Never written
-        # to settings.json — same memory-only precedent as the dry-run
-        # toggle. ``_configured_threshold`` is the mount-time file value the
-        # screen reverts to on exit; ``_entry_threshold`` is the value when
-        # adjust mode was entered (wake/log only on a net change).
+        # Threshold adjustment (t, then arrows; enter/t/esc to finish).
+        # Finishing saves the value to settings.json. ``_configured_threshold``
+        # tracks the file value: while the live one differs the summary says
+        # "(session)" and exit reverts the bar tick to it — only relevant
+        # when saving failed. ``_entry_threshold`` is the value when adjust
+        # mode was entered (wake/log only on a net change).
         self._adjusting = False
         self._configured_threshold: float | None = None
         self._entry_threshold: float | None = None
 
     def compose(self) -> ComposeResult:
-        yield AccountsPanel(show_minis=False, id="auto-active-panel")
+        yield AccountsPanel(show_inactive=False, id="auto-active-panel")
         with Vertical(id="auto-top"):
             with Horizontal(id="auto-title-row"):
                 yield Static(" DRY-RUN ", id="mode-badge", classes="dry")
@@ -111,7 +125,9 @@ class AutoScreen(Screen):
         self._update_summary()
         self.watch(self.app, "snapshot", self._on_snapshot)
         self.watch(self.app, "theme", self._on_theme_change)
-        self._start_engine(dry_run=True)
+        # Dry-run unless going live was confirmed here before and saved: a
+        # reopen must not quietly drop the protection the user turned on.
+        self._start_engine(dry_run=not self._saved_auto_live())
 
     def on_unmount(self) -> None:
         if self._engine is not None:
@@ -165,18 +181,20 @@ class AutoScreen(Screen):
 
     def _end_adjust(self) -> None:
         self._adjusting = False
-        self._update_summary()
         self.refresh_bindings()
         if self._settings.threshold == self._entry_threshold:
+            self._update_summary()
             return  # no net change: nothing to announce, no tick to force
         if self._engine is not None:
             self._engine.wake()  # show a decision at the new value now
-        self.query_one("#event-log", RichLog).write(
-            Text(
-                f"— threshold set to {pct_label(self._settings.threshold)}% "
-                "for this session —",
-                style=Palette.from_theme(self.app.current_theme).muted,
-            )
+        value = self._settings.threshold
+        saved = self._persist("autoswitch.threshold", format_setting_value(value))
+        if saved:
+            self._configured_threshold = value
+        self._update_summary()
+        self._log_note(
+            f"— threshold set to {pct_label(value)}% "
+            f"({'saved' if saved else 'this session only'}) —"
         )
 
     def _set_threshold(self, value: float) -> None:
@@ -200,9 +218,79 @@ class AutoScreen(Screen):
         if self._settings.threshold != self._configured_threshold:
             text.append(" (session)", style=palette.muted)
         text.append(f" · poll every {self._settings.interval_seconds:.0f}s")
+        models = parse_model_names(self._settings.model)
+        text.append(" · model limit ")
+        text.append(
+            ", ".join(models) if models else "off",
+            style=palette.accent if models else "",
+        )
         if self._adjusting:
             text.append("   ← → adjust · enter done", style=palette.muted)
         self.query_one("#auto-summary", Static).update(text)
+
+    # -- persistence & per-model limit --------------------------------------
+
+    def _saved_auto_live(self) -> bool:
+        try:
+            return load_ui_settings(self.app.switcher.backup_dir).auto_live
+        except Exception:
+            return False
+
+    def _persist(self, dotted_key: str, value: str | None) -> bool:
+        """Write one settings.json key (``None`` unsets it). A failed write
+        is reported and leaves the session value in force; never raises."""
+        backup_dir = self.app.switcher.backup_dir
+        try:
+            if value is None:
+                unset_setting(backup_dir, dotted_key)
+            else:
+                set_setting(backup_dir, dotted_key, value)
+        except (ConfigError, OSError) as exc:
+            self.app.notify(
+                f"Could not save {dotted_key}: {exc}", severity="warning"
+            )
+            return False
+        return True
+
+    def _log_note(self, message: str) -> None:
+        self.query_one("#event-log", RichLog).write(
+            Text(message, style=Palette.from_theme(self.app.current_theme).muted)
+        )
+
+    def _scoped_names(self) -> list[str]:
+        """Per-model window names the accounts report (e.g. ``["Fable"]``),
+        first spelling wins, in snapshot order."""
+        snap = self.app.snapshot
+        seen: dict[str, str] = {}
+        for acc in (snap.accounts if snap else ()):
+            last_good = acc.usage.last_good
+            scoped = last_good.get("scoped") if isinstance(last_good, dict) else None
+            for window in scoped or []:
+                name = window.get("name") if isinstance(window, dict) else None
+                if isinstance(name, str) and name and name.lower() not in seen:
+                    seen[name.lower()] = name
+        return list(seen.values())
+
+    def action_cycle_model(self) -> None:
+        """Cycle ``autoswitch.model``: off → each per-model window the
+        accounts report (e.g. Fable) → all → off. Saved to settings.json,
+        and the engine restarts on the new axes (fixed at construction)."""
+        options: list[str | None] = [None, *self._scoped_names(), "all"]
+        current = (self._settings.model or "").lower()
+        index = next(
+            (i for i, option in enumerate(options) if (option or "").lower() == current),
+            -1,  # a hand-edited list ("Fable,Opus"): the next step is "off"
+        )
+        chosen = options[(index + 1) % len(options)]
+        self._settings = replace(self._settings, model=chosen)
+        self._persist("autoswitch.model", chosen)
+        if self._engine is not None:
+            self._restart_engine(dry_run=self._engine.dry_run)
+        self._update_summary()
+        snap = self.app.snapshot
+        if snap is not None:
+            self._on_snapshot(snap)  # re-rank candidates on the new axes
+        self._log_note(f"— model limit: {chosen or 'off'} —")
 
     # -- engine -------------------------------------------------------------
 
@@ -255,7 +343,8 @@ class AutoScreen(Screen):
                 ConfirmModal(
                     "Go live? claude-swap will switch your active account "
                     "automatically when the threshold is reached.\n\n"
-                    "(Same behavior as running `cswap auto` in a terminal.)",
+                    "(Same behavior as running `cswap auto` in a terminal. "
+                    "This view stays live the next time it opens.)",
                     title="Go live",
                     yes_label="Go live",
                 ),
@@ -263,10 +352,12 @@ class AutoScreen(Screen):
             )
         else:
             self._restart_engine(dry_run=True)
+            self._persist("ui.autoLive", "false")
 
     def _on_live_confirm(self, confirmed: bool | None) -> None:
         if confirmed:
             self._restart_engine(dry_run=False)
+            self._persist("ui.autoLive", "true")
 
     def _restart_engine(self, *, dry_run: bool) -> None:
         if self._engine is not None:

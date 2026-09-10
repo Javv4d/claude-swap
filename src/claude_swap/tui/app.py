@@ -79,9 +79,14 @@ class CswapApp(App):
         except Exception:
             self.threshold_pct = None
         try:
-            self._theme_name = load_ui_settings(switcher.backup_dir).theme
+            ui = load_ui_settings(switcher.backup_dir)
+            self._theme_name = ui.theme
+            # How the dashboard draws accounts other than the active login
+            # ("full" cards or one-line "mini" rows).
+            self.inactive_cards = ui.inactive_cards
         except Exception:
             self._theme_name = "auto"
+            self.inactive_cards = "full"
 
     def on_mount(self) -> None:
         self.register_theme(CSWAP_DARK)
