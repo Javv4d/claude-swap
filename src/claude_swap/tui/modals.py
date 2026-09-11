@@ -11,6 +11,13 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Static
 
+from claude_swap.rules import (
+    AccountRule,
+    parse_hard_limit,
+    parse_priority,
+    parse_swap_limit,
+)
+
 
 class ConfirmModal(ModalScreen[bool]):
     """Yes/No confirmation. Dismisses with True only on explicit confirm.
@@ -128,6 +135,114 @@ class AddTokenModal(ModalScreen["TokenForm | None"]):
                 self.query_one("#form-error", Static).update("Slot must be >= 1.")
                 return
         self.dismiss(TokenForm(token=token, email=email, slot=slot))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+@dataclass
+class RuleForm:
+    """What the account-rules modal collects (already validated)."""
+
+    swap_limit: float | None
+    hard_limit: float
+    priority: int
+    reset: bool = False
+
+
+class RuleModal(ModalScreen["RuleForm | None"]):
+    """Edit one account's switching rule: swap limit, hard limit, priority.
+
+    Blank fields mean the default (the global threshold / 100 / 1); the
+    "Defaults" button clears all three. Same ←/→ button navigation as the
+    other forms.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("left", "app.focus_previous", show=False),
+        Binding("right", "app.focus_next", show=False),
+    ]
+
+    def __init__(
+        self,
+        number: str,
+        label: str,
+        rule: AccountRule,
+        threshold: float | None,
+    ) -> None:
+        super().__init__()
+        self._number = number
+        self._label = label
+        self._rule = rule
+        self._threshold = threshold
+
+    def compose(self) -> ComposeResult:
+        rule = self._rule
+        default_swap = (
+            f"{self._threshold:.10g}" if self._threshold is not None else "threshold"
+        )
+        with Vertical(classes="modal-box"):
+            yield Label(
+                f"Rules for account {self._number} · {self._label}",
+                classes="modal-title",
+            )
+            yield Static(
+                "swap limit: start looking for a better account at this % "
+                "(blank = global threshold).\n"
+                "hard limit: never use past this % — not a target, and left "
+                "at once when active (blank = 100).\n"
+                "priority: 1 is most preferred; ties route by usage (blank = 1).",
+                classes="modal-body",
+            )
+            yield Input(
+                value="" if rule.swap_limit is None else f"{rule.swap_limit:.10g}",
+                placeholder=f"swap limit % (default {default_swap})",
+                id="swap",
+                type="number",
+            )
+            yield Input(
+                value="" if rule.hard_limit >= 100.0 else f"{rule.hard_limit:.10g}",
+                placeholder="hard limit % (default 100)",
+                id="hard",
+                type="number",
+            )
+            yield Input(
+                value="" if rule.priority == 1 else str(rule.priority),
+                placeholder="priority (default 1)",
+                id="priority",
+                type="integer",
+            )
+            yield Static("", id="form-error", classes="form-error")
+            with Horizontal(classes="modal-buttons"):
+                yield Button("Save", id="save")
+                yield Button("Defaults", id="defaults")
+                yield Button("Cancel", id="cancel")
+            yield Static(
+                "enter save  ·  tab next field  ·  esc cancel",
+                classes="modal-hint",
+            )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+        elif event.button.id == "defaults":
+            self.dismiss(RuleForm(None, 100.0, 1, reset=True))
+        else:
+            self._submit()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._submit()
+
+    def _submit(self) -> None:
+        try:
+            swap = parse_swap_limit(self.query_one("#swap", Input).value)
+            hard = parse_hard_limit(self.query_one("#hard", Input).value)
+            priority = parse_priority(self.query_one("#priority", Input).value)
+        except ValueError as exc:
+            self.query_one("#form-error", Static).update(str(exc))
+            return
+        self.dismiss(RuleForm(swap, hard, priority))
 
     def action_cancel(self) -> None:
         self.dismiss(None)

@@ -12,6 +12,7 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from claude_swap.rules import AccountRule
 from claude_swap.usage_store import UsageEntry
 
 if TYPE_CHECKING:
@@ -140,6 +141,7 @@ class AccountSnapshot:
     usage: UsageEntry
     alias: str = ""
     disabled: bool = False  # held out of auto-rotation (still a valid explicit target)
+    rule: AccountRule = AccountRule()  # swap limit / hard limit / priority
 
     @property
     def display_tag(self) -> str:

@@ -79,6 +79,7 @@ class DashboardScreen(Screen):
             ("Auto-switch view", "auto"),
             ("Add account…", "add-menu"),
             ("Disable / enable account…", "disable-menu"),
+            ("Account rules…", "rules-menu"),
             ("Remove account…", "remove-menu"),
             ("Theme…", "theme-menu"),
             ("Quit", "quit"),
@@ -116,6 +117,17 @@ class DashboardScreen(Screen):
             entries.append(
                 (f"{acc.number}  {name}{state}   {action}", f"disable:{acc.number}")
             )
+        entries.append(_BACK)
+        return entries
+
+    def _rules_entries(self) -> MenuEntries:
+        """One row per account with its current rule (or "defaults")."""
+        snap = self.app.snapshot
+        entries: MenuEntries = []
+        for acc in (snap.accounts if snap else ()):
+            name = f"{acc.alias} ({acc.email})" if acc.alias else acc.email
+            summary = acc.rule.summary(self.app.threshold_pct) or "defaults"
+            entries.append((f"{acc.number}  {name}   {summary}", f"rule:{acc.number}"))
         entries.append(_BACK)
         return entries
 
@@ -191,6 +203,12 @@ class DashboardScreen(Screen):
         elif action_id.startswith("disable:"):
             number = action_id.split(":", 1)[1]
             app.do_toggle_disabled(number)
+            await self._pop_menu()
+        elif action_id == "rules-menu":
+            await self._push_menu("account rules", self._rules_entries())
+        elif action_id.startswith("rule:"):
+            number = action_id.split(":", 1)[1]
+            app.open_rule_editor(number)
             await self._pop_menu()
         else:
             actions[action_id]()

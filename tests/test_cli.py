@@ -821,6 +821,7 @@ class TestRunCommand:
             env=_subprocess_env(),
         )
         assert "alias <num|email>" in result.stdout
+        assert "rule <num|email>" in result.stdout
 
     def test_session_error_exits_cleanly(self, capsys):
         class FailingSessionManager:
@@ -1441,6 +1442,56 @@ class TestAliasCommand:
 
         data = ClaudeAccountSwitcher()._get_sequence_data()
         assert "alias" not in data["accounts"]["2"]
+
+    def test_rule_sets_lists_and_reports_json(self, temp_home, capsys):
+        import json as _json
+
+        self._seeded_switcher_env(temp_home)
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._rule_command(
+                ["2", "--priority", "2", "--hard-limit", "50", "--swap-limit", "95%"]
+            )
+        record = ClaudeAccountSwitcher()._get_sequence_data()["accounts"]["2"]
+        assert (record["priority"], record["hardLimit"], record["swapLimit"]) == (2, 50.0, 95.0)
+        assert "p2 · swap 95% · hard 50%" in capsys.readouterr().out
+
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._rule_command([])
+        assert "priority 2 · swap 95% · hard 50%" in capsys.readouterr().out
+
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._rule_command(["--json"])
+        payload = _json.loads(capsys.readouterr().out)
+        assert payload["rules"] == [{
+            "number": 2, "email": "work@co.com",
+            "swapLimit": 95.0, "hardLimit": 50.0, "priority": 2,
+        }]
+
+    def test_rule_off_clears_one_field_and_reset_clears_all(self, temp_home, capsys):
+        self._seeded_switcher_env(temp_home)
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._rule_command(["work@co.com", "--priority", "3", "--hard-limit", "40"])
+            cli._rule_command(["2", "--hard-limit", "off"])
+        record = ClaudeAccountSwitcher()._get_sequence_data()["accounts"]["2"]
+        assert "hardLimit" not in record and record["priority"] == 3
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._rule_command(["2", "--reset"])
+        record = ClaudeAccountSwitcher()._get_sequence_data()["accounts"]["2"]
+        assert not any(k in record for k in ("swapLimit", "hardLimit", "priority"))
+        assert "defaults" in capsys.readouterr().out
+
+    def test_rule_rejects_bad_values_and_empty_edits(self, temp_home, capsys):
+        self._seeded_switcher_env(temp_home)
+        with patch("os.geteuid", return_value=1000, create=True):
+            with pytest.raises(SystemExit):
+                cli._rule_command(["2", "--priority", "0"])
+            assert "between 1 and 99" in capsys.readouterr().err
+            with pytest.raises(SystemExit):
+                cli._rule_command(["2"])  # nothing to set
+            with pytest.raises(SystemExit):
+                cli._rule_command(["--reset"])  # no account
+        record = ClaudeAccountSwitcher()._get_sequence_data()["accounts"]["2"]
+        assert "priority" not in record
 
     def test_list_aliases(self, temp_home, capsys):
         switcher = self._seeded_switcher_env(temp_home)

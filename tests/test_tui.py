@@ -834,6 +834,7 @@ class TestDashboard:
                 "auto",
                 "add-menu",
                 "disable-menu",
+                "rules-menu",
                 "remove-menu",
                 "theme-menu",
                 "quit",
@@ -1820,3 +1821,151 @@ class TestThemeWiring:
             assert app._theme_name == "light"
             assert app.theme == "cswap-light"
 
+
+
+@pytest.mark.asyncio
+class TestAccountRulesUI:
+    """rules.py in the TUI: chips and ticks on the cards, the editor modal,
+    and the auto view's priority-aware candidate list."""
+
+    async def test_card_shows_rule_chips_hard_tick_and_over_limit_marker(self, tmp_path):
+        from claude_swap.rules import AccountRule
+
+        fake = FakeSwitcher(
+            [
+                make_account(1, active=True, entry=make_entry(47.0, 63.0)),
+                dataclasses.replace(
+                    make_account(2, entry=make_entry(30.0, 10.0)),
+                    rule=AccountRule(swap_limit=80.0, hard_limit=50.0, priority=2),
+                ),
+                dataclasses.replace(
+                    make_account(3, entry=make_entry(55.0, 10.0)),
+                    rule=AccountRule(hard_limit=50.0, priority=2),
+                ),
+            ],
+            tmp_path,
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            from claude_swap.tui.widgets import AccountsPanel, bar_cells
+            from claude_swap.tui.theme import Palette
+
+            panel = app.screen.query_one(AccountsPanel).render()
+            plain = panel.plain
+            card1 = plain.split("user2@example.com", 1)[0]
+            assert "p2" not in card1 and "hard" not in card1  # default rule: no chips
+            card2 = plain.split("user2@example.com", 1)[1].split("user3@example.com", 1)[0]
+            assert "p2 · swap 80% · hard 50%" in card2
+            assert "over hard limit" not in card2  # 30% < 50%
+            card3 = plain.split("user3@example.com", 1)[1]
+            assert "p2 · hard 50%" in card3
+            assert "⛔ over hard limit" in card3  # 55% >= 50%
+            # the hard-limit tick is drawn in the critical color, the swap
+            # tick in the warning color, at their own positions
+            cells = bar_cells(10.0, 20, threshold=80.0, hard_limit=50.0, palette=Palette.DARK)
+            styles = {i: str(span.style) for span in cells.spans for i in range(span.start, span.end)}
+            assert styles[10] == Palette.DARK.sev_crit  # 50% of 20 cells
+            assert styles[16] == Palette.DARK.sev_warn  # 80% of 20 cells
+
+    async def test_rules_menu_opens_editor_and_saves(self, tmp_path):
+        fake = FakeSwitcher(
+            [make_account(1, active=True), make_account(2)], tmp_path
+        )
+        saved: list[tuple] = []
+
+        def set_account_rule(number, **kwargs):
+            saved.append((number, kwargs))
+            print(f"Rule Account-{number}: ok")
+
+        fake.set_account_rule = set_account_rule
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "rules-menu")
+            from textual.widgets import ListView, Input
+
+            from claude_swap.tui.widgets import MenuItem
+
+            menu = app.screen.query_one("#menu", ListView)
+            ids = [item.action_id for item in menu.query(MenuItem)]
+            assert ids == ["rule:1", "rule:2", "back"]
+            labels = [
+                getattr(r := item.query_one("Static").render(), "plain", str(r))
+                for item in menu.query(MenuItem)
+            ]
+            assert "defaults" in labels[1]
+            await menu_select(pilot, "rule:2")
+            from claude_swap.tui.modals import RuleModal
+
+            assert isinstance(app.screen, RuleModal)
+            app.screen.query_one("#swap", Input).value = "95"
+            app.screen.query_one("#hard", Input).value = "50"
+            app.screen.query_one("#priority", Input).value = "2"
+            await pilot.press("enter")
+            await settle(pilot)
+            assert saved == [
+                ("2", {"swap_limit": 95.0, "hard_limit": 50.0, "priority": 2})
+            ]
+
+    async def test_rule_editor_rejects_bad_input_and_defaults_button_resets(self, tmp_path):
+        fake = FakeSwitcher(
+            [make_account(1, active=True), make_account(2)], tmp_path
+        )
+        saved: list[tuple] = []
+        fake.set_account_rule = lambda number, **kw: saved.append((number, kw))
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            app.open_rule_editor("2")
+            await pilot.pause()
+            from textual.widgets import Button, Input, Static
+
+            app.screen.query_one("#hard", Input).value = "150"
+            await pilot.press("enter")
+            await pilot.pause()
+            from claude_swap.tui.modals import RuleModal
+
+            assert isinstance(app.screen, RuleModal)  # still open
+            rendered = app.screen.query_one("#form-error", Static).render()
+            assert "hard limit must be between" in getattr(rendered, "plain", str(rendered))
+            assert saved == []
+            app.screen.query_one("#defaults", Button).press()
+            await settle(pilot)
+            assert saved == [("2", {"reset": True})]
+
+    async def test_auto_view_candidates_rank_by_priority_and_mark_hard_limit(
+        self, tmp_path, fake_engine
+    ):
+        from claude_swap.rules import AccountRule
+
+        fake = FakeSwitcher(
+            [
+                make_account(1, active=True, entry=make_entry(96.0, 20.0)),
+                dataclasses.replace(
+                    make_account(2, entry=make_entry(10.0, 5.0)),
+                    rule=AccountRule(hard_limit=50.0, priority=2),
+                ),
+                make_account(3, entry=make_entry(70.0, 5.0)),
+                dataclasses.replace(
+                    make_account(4, entry=make_entry(55.0, 5.0)),
+                    rule=AccountRule(hard_limit=50.0, priority=2),
+                ),
+            ],
+            tmp_path,
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("g")
+            await pilot.pause()
+            await settle(pilot)
+            from textual.widgets import Static
+
+            plain = app.screen.query_one("#candidates", Static).render().plain
+            # priority 1 (70% used) ranks above the roomier priority-2 backup
+            assert plain.index("user3@example.com") < plain.index("user2@example.com")
+            # the capped backup is marked and sorts last
+            assert "at hard limit 50%" in plain
+            assert plain.index("user2@example.com") < plain.index("user4@example.com")
+            assert "p2" in plain

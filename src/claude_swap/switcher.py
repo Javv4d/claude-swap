@@ -62,6 +62,14 @@ from claude_swap.models import (
     get_timestamp,
     normalize_alias,
 )
+from claude_swap.rules import (
+    KEEP,
+    AccountRule,
+    apply_rule,
+    cap_headroom,
+    effective_threshold,
+    rule_from_record,
+)
 from claude_swap.printer import (
     abbreviate_path,
     accent,
@@ -1765,6 +1773,7 @@ class ClaudeAccountSwitcher:
                     usage=entries[n],
                     alias=alias,
                     disabled=self._disabled_from_data(seq_data, n),
+                    rule=rule_from_record(seq_data.get("accounts", {}).get(n)),
                 )
             )
         return AccountsSnapshot(
@@ -1913,6 +1922,67 @@ class ClaudeAccountSwitcher:
                 )
         else:
             print(dimmed("  It is back in the rotation."))
+
+    def account_rules(self) -> dict[str, AccountRule]:
+        """Every managed slot's switching rule (see ``rules.py``); unedited
+        slots read as the default rule."""
+        data = self._get_sequence_data() or {}
+        return {
+            str(num): rule_from_record(record)
+            for num, record in (data.get("accounts") or {}).items()
+        }
+
+    def account_rule(self, account_num: str) -> AccountRule:
+        data = self._get_sequence_data() or {}
+        return rule_from_record((data.get("accounts") or {}).get(str(account_num)))
+
+    def set_account_rule(
+        self,
+        identifier: str,
+        *,
+        swap_limit=KEEP,
+        hard_limit=KEEP,
+        priority=KEEP,
+        reset: bool = False,
+        quiet: bool = False,
+    ) -> tuple[str, str, AccountRule]:
+        """Set (or clear) a slot's swap limit / hard limit / priority.
+
+        Values are already parsed (``rules.parse_*``); ``KEEP`` leaves a
+        field alone and ``reset`` clears all three first. The rule takes
+        effect on the auto engine's next tick and in the usage-aware manual
+        strategies immediately — no restart. Returns ``(num, email, rule)``.
+
+        Raises:
+            ConfigError: no accounts are managed yet, or the email is ambiguous.
+            AccountNotFoundError: identifier doesn't match any account.
+        """
+        if not self.sequence_file.exists():
+            raise ConfigError("No accounts are managed yet")
+        account_num, email, _ = self.resolve_account(identifier)
+        data = self._get_sequence_data() or {}
+        record = data.get("accounts", {}).get(account_num)
+        if not record:
+            raise AccountNotFoundError(f"Account-{account_num} does not exist")
+        rule = apply_rule(
+            record,
+            swap_limit=swap_limit,
+            hard_limit=hard_limit,
+            priority=priority,
+            reset=reset,
+        )
+        data["lastUpdated"] = get_timestamp()
+        self._write_json(self.sequence_file, data)
+        summary = rule.summary() or "defaults"
+        self._logger.info(f"Rule for account {account_num} ({email}): {summary}")
+        if not quiet:
+            print(f"{accent('Rule')} Account-{account_num} ({email}): {summary}")
+            if rule.swap_limit is not None and rule.swap_limit >= rule.hard_limit:
+                print(dimmed(
+                    "  swap limit is at or above the hard limit — this account "
+                    "is only ever left at its hard limit."
+                ))
+        return account_num, email, rule
 
     def account_kind_for(self, account_num: str) -> str:
         """Public wrapper: ``"api_key"`` or ``"oauth"`` (setup-tokens read as oauth)."""
@@ -5193,6 +5263,7 @@ class ClaudeAccountSwitcher:
         """
         now = self._usage_store.clock()
         threshold, models = self._poll_policy_inputs()
+        rules = self.account_rules()
         plans: dict[str, tuple[float | None, float | None]] = {}
         for num, rec in records.items():
             if rec.sentinel is not None or rec.error is not None:
@@ -5204,7 +5275,8 @@ class ClaudeAccountSwitcher:
                 prev_usage=before.last_good if before else None,
                 new_usage=rec.usage,
                 is_active=bool(info_by_num[num][4]),
-                threshold=threshold,
+                # Urgent mode near whichever of the slot's limits comes first.
+                threshold=rules.get(str(num), AccountRule()).leave_at(threshold),
                 models=models,
                 recent_429=recent_429,
                 now=now,
@@ -5325,24 +5397,61 @@ class ClaudeAccountSwitcher:
 
         if usage is None:
             usage = self._usage_by_account()
-        current_headroom = oauth.account_headroom(usage.get(str(current_num)), models)
+        # Headroom on the capped scale (rules.py): a slot at its hard limit
+        # reads as 0 here, exactly like one at the provider's limit.
+        rules = self.account_rules()
+
+        def rule_of(num: str) -> AccountRule:
+            return rules.get(str(num), AccountRule())
+
+        current_headroom = cap_headroom(
+            oauth.account_headroom(usage.get(str(current_num)), models),
+            rule_of(str(current_num)),
+        )
         if current_headroom is None:
             # Can't measure where the user is → can't prove any target is
             # better. Stay rather than risk moving onto a worse account.
             return None, "current-unavailable"
 
         scored = [
-            (oauth.account_headroom(usage.get(num), models), num) for num in others
+            (cap_headroom(oauth.account_headroom(usage.get(num), models), rule_of(num)), num)
+            for num in others
         ]
         known = [(h, num) for h, num in scored if h is not None]
         if not known:
             return None, "no-comparison"
 
-        # max() keeps the first maximal element; `known` preserves rotation
-        # order, so ties resolve to the earliest slot.
-        best_headroom, best_num = max(known, key=lambda t: t[0])
-        if best_headroom > current_headroom:
-            return best_num, ""
+        # Priority first (1 is most preferred), then most headroom — the same
+        # order the auto engine ranks in. min() keeps the first minimal
+        # element; `known` preserves rotation order, so ties resolve to the
+        # earliest slot. "Healthy" = below the slot's own swap limit: a
+        # more-preferred account is only worth returning to while it is.
+        threshold, _ = self._poll_policy_inputs()
+
+        def healthy(h: float, num: str) -> bool:
+            return h > 0 and (100.0 - h) < effective_threshold(rule_of(num), threshold)
+
+        usable = sorted(
+            [(h, num) for h, num in known if h > 0],
+            key=lambda t: (rule_of(t[1]).priority, -t[0]),
+        )
+        if usable:
+            best_headroom, best_num = usable[0]
+            best_priority = rule_of(best_num).priority
+            current_priority = rule_of(str(current_num)).priority
+            if best_priority < current_priority and healthy(best_headroom, best_num):
+                return best_num, ""  # a more-preferred account is healthy again
+            if best_priority == current_priority and best_headroom > current_headroom:
+                return best_num, ""
+            if not healthy(current_headroom, str(current_num)):
+                # Past our own swap limit (or capped): any healthy slot,
+                # most-preferred first, beats staying — and if none is
+                # healthy but we are out entirely, any slot with room does.
+                for h, num in usable:
+                    if healthy(h, num):
+                        return num, ""
+                if current_headroom <= 0:
+                    return best_num, ""
 
         # Current is at least as good as every account we can measure. Stay —
         # but only claim "all exhausted" when every candidate's usage is known.
@@ -5491,6 +5600,9 @@ class ClaudeAccountSwitcher:
                     ),
                     alias=alias,
                     disabled=self._disabled_from_data(seq_data, str(num)),
+                    rules=rule_from_record(
+                        seq_data.get("accounts", {}).get(str(num))
+                    ).to_record_fields() or None,
                     login_expires_at=oauth.login_expires_at_iso(creds),
                 )
             )
@@ -5559,6 +5671,9 @@ class ClaudeAccountSwitcher:
             print(f"  {num}: {label} {muted(f'[{tag}]')}{markers}")
             for line in _usage_entry_lines(entries[str(num)]):
                 print(f"     {line}")
+            rule = rule_from_record(seq_data.get("accounts", {}).get(str(num)))
+            if not rule.is_default:
+                print(f"     {dimmed('•')} {muted('rule: ' + rule.summary())}")
 
             if show_token_status:
                 for line in self._token_status_lines(accounts_info[i]):
@@ -6100,11 +6215,16 @@ class ClaudeAccountSwitcher:
                     )
                 continue
             if strategy == "next-available":
-                headroom = oauth.account_headroom(usage.get(candidate), models)
+                raw_headroom = oauth.account_headroom(usage.get(candidate), models)
+                candidate_rule = self.account_rule(candidate)
+                headroom = cap_headroom(raw_headroom, candidate_rule)
                 if headroom is not None and headroom <= 0:
                     skipped_exhausted.append(candidate)
                     label = "5h/7d"
-                    if models:
+                    if raw_headroom is not None and raw_headroom > 0:
+                        # Only the slot's own rule binds: say so, not "5h/7d".
+                        label = f"hard limit {candidate_rule.hard_limit:.10g}%"
+                    elif models:
                         # Name what actually binds ("Fable", "5h/Fable", ...)
                         # so a config-driven skip is never mysterious.
                         at = [

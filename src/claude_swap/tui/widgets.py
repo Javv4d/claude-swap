@@ -17,6 +17,7 @@ from textual.widgets import ListItem, Static
 from claude_swap import pace
 from claude_swap.json_output import USAGE_API_KEY
 from claude_swap.models import AccountSnapshot
+from claude_swap.rules import AccountRule
 from claude_swap.switcher import ERROR_NOTES
 from claude_swap.usage_store import STALE_OK_S
 from claude_swap.tui import data
@@ -37,9 +38,12 @@ def bar_cells(
     *,
     stale: bool = False,
     threshold: float | None = None,
+    hard_limit: float | None = None,
     palette: Palette = Palette.DARK,
 ) -> Text:
-    """Just the bar glyphs: severity-colored fill, track, optional tick."""
+    """Just the bar glyphs: severity-colored fill, track, optional ticks —
+    the swap threshold (warning color) and, when the account has one below
+    100, its hard limit (critical color)."""
     text = Text()
     if pct is None:
         text.append(_BAR_EMPTY * width, style=palette.track)
@@ -51,10 +55,15 @@ def bar_cells(
     tick_at: int | None = None
     if threshold is not None:
         tick_at = min(width - 1, max(0, round(threshold / 100.0 * width)))
+    hard_at: int | None = None
+    if hard_limit is not None and hard_limit < 100.0:
+        hard_at = min(width - 1, max(0, round(hard_limit / 100.0 * width)))
     color = palette.severity(pct)
     fill_style = f"{color} dim" if stale else color
     for i in range(width):
-        if tick_at is not None and i == tick_at:
+        if hard_at is not None and i == hard_at:
+            text.append(_BAR_TICK, style=palette.sev_crit)
+        elif tick_at is not None and i == tick_at:
             text.append(_BAR_TICK, style=palette.sev_warn)
         elif i < full:
             text.append(_BAR_FILLED, style=fill_style)
@@ -73,12 +82,16 @@ def usage_bar(
     *,
     stale: bool = False,
     threshold: float | None = None,
+    hard_limit: float | None = None,
     palette: Palette = Palette.DARK,
 ) -> Text:
     """One full bar line: ``5h ━━━━╸────┃──  47%  resets 2h 13m · 20:39``."""
     text = Text()
     text.append(f"{label} ", style=palette.muted)
-    text.append(bar_cells(pct, width, stale=stale, threshold=threshold, palette=palette))
+    text.append(bar_cells(
+        pct, width, stale=stale, threshold=threshold, hard_limit=hard_limit,
+        palette=palette,
+    ))
     if pct is None:
         text.append("  usage unknown", style=palette.muted)
     else:
@@ -160,6 +173,27 @@ def usage_rows(
     return rows
 
 
+def _over_hard_limit(acc: AccountSnapshot) -> bool:
+    """Whether the account's 5h/7d usage has reached its own hard limit."""
+    rule = acc.rule
+    if rule.hard_limit >= 100.0:
+        return False
+    pcts = [
+        p
+        for p in (
+            data.window_pct(acc.usage.last_good, "five_hour"),
+            data.window_pct(acc.usage.last_good, "seven_day"),
+        )
+        if p is not None
+    ]
+    return bool(pcts) and max(pcts) >= rule.hard_limit
+
+
+def rule_chips(rule: AccountRule, threshold: float | None) -> str:
+    """The card/mini header's rule summary (``p2 · hard 50%``), or ``""``."""
+    return rule.summary(threshold)
+
+
 def account_card_text(
     acc: AccountSnapshot,
     width: int,
@@ -168,7 +202,9 @@ def account_card_text(
     now: float | None = None,
     palette: Palette = Palette.DARK,
 ) -> Text:
-    """The full account card: header line + per-window bar rows."""
+    """The full account card: header line + per-window bar rows. The bars
+    carry the account's own swap threshold tick and, if it has one, a
+    critical-colored hard-limit tick (rules.py)."""
     now = now if now is not None else time.time()
 
     text = Text()
@@ -183,6 +219,11 @@ def account_card_text(
         text.append("   ● active", style=f"bold {palette.accent}")
     if acc.disabled:
         text.append("   (disabled)", style=palette.muted)
+    chips = rule_chips(acc.rule, threshold)
+    if chips:
+        text.append(f"   {chips}", style=palette.muted)
+    if _over_hard_limit(acc):
+        text.append("   ⛔ over hard limit", style=f"bold {palette.sev_crit}")
     age = data.format_age(acc.usage.age_s)
     if age:
         text.append(f"   {age}", style=palette.muted)
@@ -216,6 +257,10 @@ def account_card_text(
         return text
 
     stale = acc.usage.age_s is not None and acc.usage.age_s > STALE_OK_S
+    # This account's own swap limit (defaulting to the global threshold) is
+    # where its tick goes; a hard limit below 100 gets the second tick.
+    tick = acc.rule.swap_for(threshold) if threshold is not None else None
+    hard_limit = acc.rule.hard_limit if acc.rule.hard_limit < 100.0 else None
     label_width = max(len(label) for label, _pct, _suffix, _full in rows)
     bar_width = max(12, min(30, width - 42 - label_width))
     # everything on a row except the suffix: indent, label, bar, " NNN%", gap
@@ -233,7 +278,8 @@ def account_card_text(
                 suffix or None,
                 bar_width,
                 stale=stale,
-                threshold=threshold,
+                threshold=tick,
+                hard_limit=hard_limit,
                 palette=palette,
             )
         )
@@ -260,6 +306,11 @@ def mini_account_text(
     text.append(f"  [{acc.display_tag}]", style=palette.muted)
     if acc.disabled:
         text.append("  (disabled)", style=palette.muted)
+    chips = rule_chips(acc.rule, None)
+    if chips:
+        text.append(f"  {chips}", style=palette.muted)
+    if _over_hard_limit(acc):
+        text.append("  ⛔ hard limit", style=f"bold {palette.sev_crit}")
     text.append("   ")
 
     sentinel = acc.usage.sentinel

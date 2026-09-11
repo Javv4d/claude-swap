@@ -243,9 +243,12 @@ def account_row(
     alias: str = "",
     disabled: bool = False,
     login_expires_at: str | None = None,
+    rules: dict | None = None,
 ) -> dict:
     """A full account row for ``--list``. ``backoff_until`` is the live
-    backoff only; a lapsed one is the caller's to withhold."""
+    backoff only; a lapsed one is the caller's to withhold. ``rules`` is the
+    slot's non-default switching rule as ``{swapLimit, hardLimit, priority}``
+    (see ``rules.py``), or None."""
     status, usage = usage_fields(usage_entry, usage_fetched_at)
     row = {
         "number": number,
@@ -263,6 +266,9 @@ def account_row(
     # existing consumers keying on the base schema are unaffected.
     if disabled:
         row["disabled"] = True
+    # Additive field: the slot's switching rule, only when one is set.
+    if rules:
+        row["rules"] = dict(rules)
     # Additive field: when the stored login records the expiry of its refresh
     # token (see ``oauth.login_expires_at_iso``), scripts can warn ahead of the
     # ``relogin_required`` that follows; absent when the login carries none.

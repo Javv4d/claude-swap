@@ -116,6 +116,23 @@ Defaults like the threshold and cooldown are configurable with `cswap config set
 
 </details>
 
+### Account rules — limits and priorities
+
+Give each account its own limits and a priority; the auto-switcher and the `best` / `next-available` strategies honour them:
+
+- **swap limit** — where auto-switch starts looking for a better account while this one is active (default: the global `autoswitch.threshold`).
+- **hard limit** — never use the account past this. It is not a switch target once there, and if it is the active account the engine leaves it at once, even far below its swap limit.
+- **priority** — 1 is most preferred. Candidates are ranked by priority first, then by usage; while a lower-priority account is active, the engine returns to a higher-priority one as soon as it is healthy again.
+
+```bash
+cswap rule                                   # every account's rule
+cswap rule 3 --priority 2 --hard-limit 50    # a borrowed backup: only when mine are out, and only to 50%
+cswap rule 1 --swap-limit 95                 # leave this account a little later than the global threshold
+cswap rule 3 --reset                         # back to the defaults
+```
+
+Example: two accounts of your own (priority 1) and a friend's backup (priority 2, hard limit 50). Auto-switch routes between your own two by usage; when both are spent it moves to the backup; the moment the backup reaches 50% it returns to whichever of yours has room — even though both are past their swap limits — and it never lands on the backup again until its window resets. The TUI shows each rule on the account card (a red tick on the bars marks the hard limit) and edits it under *Account rules…*.
+
 ### Run multiple accounts at the same time (session mode)
 
 Launch Claude Code as a specific account in the current terminal only — every other terminal and the VS Code extension stay on your default account, so two accounts can work in parallel.

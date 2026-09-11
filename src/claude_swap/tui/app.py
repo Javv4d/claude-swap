@@ -25,7 +25,14 @@ from claude_swap.switcher import ClaudeAccountSwitcher
 from claude_swap.tui.autoview import AutoScreen
 from claude_swap.tui.dashboard import DashboardScreen, WatchScreen
 from claude_swap.tui.data import ActionResult, SnapshotSource, format_duration, run_action
-from claude_swap.tui.modals import AddTokenModal, ConfirmModal, OutputModal, TokenForm
+from claude_swap.tui.modals import (
+    AddTokenModal,
+    ConfirmModal,
+    OutputModal,
+    RuleForm,
+    RuleModal,
+    TokenForm,
+)
 from claude_swap.tui.theme import CSWAP_DARK, CSWAP_LIGHT
 
 
@@ -333,6 +340,35 @@ class CswapApp(App):
                 f"Remove account {number}",
                 partial(self.switcher.remove_account, number, assume_yes=True),
             )
+
+    def open_rule_editor(self, number: str) -> None:
+        """Edit one account's swap limit / hard limit / priority (rules.py)."""
+        snap = self.snapshot
+        acc = next(
+            (a for a in (snap.accounts if snap else ()) if a.number == number), None
+        )
+        if acc is None:
+            return
+        label = f"{acc.alias} ({acc.email})" if acc.alias else acc.email
+        self.push_screen(
+            RuleModal(number, label, acc.rule, self.threshold_pct),
+            partial(self._on_rule_form, number),
+        )
+
+    def _on_rule_form(self, number: str, form: RuleForm | None) -> None:
+        if form is None:
+            return
+        if form.reset:
+            fn = partial(self.switcher.set_account_rule, number, reset=True)
+        else:
+            fn = partial(
+                self.switcher.set_account_rule,
+                number,
+                swap_limit=form.swap_limit,
+                hard_limit=form.hard_limit,
+                priority=form.priority,
+            )
+        self._start_action(f"Rules for account {number}", fn)
 
     def action_add_current(self) -> None:
         self.push_screen(

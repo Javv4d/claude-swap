@@ -51,6 +51,7 @@ from claude_swap.poll_policy import (
     RESET_SLACK_S,
     binding_pct,
 )
+from claude_swap.rules import AccountRule, cap_headroom, effective_threshold
 from claude_swap.settings import AutoSwitchSettings, atomic_write_json, parse_model_names
 from claude_swap.switcher import ClaudeAccountSwitcher
 from claude_swap.usage_store import due_candidate, plan_oversleeps_interval
@@ -362,7 +363,9 @@ class PollEvent(AutoSwitchEvent):
 @dataclass(frozen=True)
 class SwitchEvent(AutoSwitchEvent):
     kind: ClassVar[str] = "switch"
-    trigger: str  # "proactive" | "at-limit" | "failover" | "consume-first"
+    # "proactive" | "at-limit" | "hard-limit" | "failover" | "consume-first"
+    # | "priority" (return to a more-preferred account; see rules.py)
+    trigger: str
     from_ref: dict | None
     to_ref: dict | None
     warnings: list[str] = field(default_factory=list)
@@ -614,6 +617,23 @@ def _every_account_above_threshold(
     return all((100.0 - h) >= threshold for h in measured)
 
 
+def _every_account_above_own_threshold(
+    candidates: Sequence[str],
+    headroom: dict[str, float | None],
+    active_headroom: float | None,
+    current: str,
+    threshold_for: Callable[[str], float],
+) -> bool:
+    """:func:`_every_account_above_threshold` with each account measured
+    against its own effective threshold (per-account swap limits, rules.py)."""
+    if active_headroom is None or (100.0 - active_headroom) < threshold_for(current):
+        return False
+    measured = [(n, headroom.get(n)) for n in candidates if headroom.get(n) is not None]
+    if not measured:
+        return False
+    return all((100.0 - h) >= threshold_for(n) for n, h in measured)
+
+
 def _ref(number: str, email: str) -> dict:
     return {"number": int(number), "email": email}
 
@@ -684,6 +704,84 @@ class AutoSwitchEngine:
         # warned) on the first tick where every relevant account has readable
         # usage — adaptive polling legitimately leaves gaps before that.
         self._model_check_done = not self._models
+        # Per-tick snapshot of every slot's switching rule (rules.py) and its
+        # effective threshold on the capped-headroom scale. Re-read each tick
+        # so `cswap rule` / the TUI editor apply without restarting the loop.
+        self._rules: dict[str, AccountRule] = {}
+        self._thresholds: dict[str, float] = {}
+
+    # -- per-account rules ----------------------------------------------------
+
+    def _load_rules(self) -> None:
+        try:
+            self._rules = self.switcher.account_rules()
+        except Exception:  # a torn sequence read must not kill the loop
+            self._rules = {}
+        threshold = self.settings.threshold
+        self._thresholds = {
+            num: effective_threshold(rule, threshold)
+            for num, rule in self._rules.items()
+        }
+
+    def _rule_for(self, num: str) -> AccountRule:
+        # getattr: the pure predicates below are also driven directly by
+        # tests on engine objects built without __init__.
+        return getattr(self, "_rules", {}).get(str(num), AccountRule())
+
+    def _threshold_for(
+        self, num: str, settings: AutoSwitchSettings | None = None
+    ) -> float:
+        """Effective threshold for one slot, on the same scale as the
+        (capped) headroom the engine decides with. ``settings`` is the
+        tick-snapshotted copy a pure predicate was handed, when it has one."""
+        fallback = (settings or self.settings).threshold
+        return getattr(self, "_thresholds", {}).get(str(num), fallback)
+
+    def _capped_headroom_by_account(
+        self, usage: dict[str, dict | str | None]
+    ) -> dict[str, float | None]:
+        return {
+            num: cap_headroom(h, self._rule_for(num))
+            for num, h in _headroom_by_account(usage, self._models).items()
+        }
+
+    def _below_threshold_detail(
+        self, current: str, usage: dict[str, dict | str | None]
+    ) -> str:
+        """``"40% < 90%"`` in the raw numbers the user sees (never the capped
+        scale), naming the hard limit when that is what binds first."""
+        value = usage.get(current)
+        raw = binding_pct(value if isinstance(value, dict) else None, self._models)
+        if raw is None:
+            return ""
+        rule = self._rule_for(current)
+        swap = rule.swap_for(self.settings.threshold)
+        if rule.hard_limit <= swap:
+            return f"{pct_label(raw)}% < {pct_label(rule.hard_limit)}% hard limit"
+        return f"{pct_label(raw)}% < {pct_label(swap)}%"
+
+    def _healthy_higher_priority(
+        self,
+        current: str,
+        quarantined: set[str],
+        headroom: dict[str, float | None],
+    ) -> bool:
+        """Is a more-preferred account (lower priority number) healthy again —
+        readable usage, room left, below its own swap limit, in rotation?"""
+        mine = self._rule_for(current).priority
+        for num in self.switcher.switchable_account_numbers():
+            if num == current or num in quarantined:
+                continue
+            if self._rule_for(num).priority >= mine:
+                continue
+            if self.switcher.account_kind_for(num) == "api_key":
+                continue
+            h = headroom.get(num)
+            if h is None or h <= 0:
+                continue
+            if (100.0 - h) < self._threshold_for(num):
+                return True
+        return False
 
     # -- state file ---------------------------------------------------------
 
@@ -894,6 +992,7 @@ class AutoSwitchEngine:
         self._blocked_wait_long = False
         self._idle_hold_slow = False
         settings = self.settings
+        self._load_rules()
         state = self._read_state()
         if not self.dry_run:
             # Dry-run must not write anything, so recovered quarantines are
@@ -976,28 +1075,42 @@ class AutoSwitchEngine:
         if active_headroom is not None:
             self._unhealthy_ticks = 0
             self._idle_hold_since = None
+            # Capped scale (rules.cap_headroom): a slot's hard limit reads as
+            # headroom 0 and its own swap limit as its effective threshold, so
+            # the default rule is byte-for-byte the old arithmetic.
             utilization = 100.0 - active_headroom
-            if utilization < settings.threshold:
-                if settings.strategy != "consume-first":
+            if utilization < self._threshold_for(current):
+                if self._healthy_higher_priority(current, quarantined, headroom):
+                    # A more-preferred account is healthy again: return to
+                    # it. Proactive family — cooldown and the no-return bar
+                    # apply — but ranked by priority, not headroom margin.
+                    trigger = "priority"
+                elif settings.strategy != "consume-first":
                     self._emit(
                         NoSwitchEvent(
                             reason="below-threshold",
                             # Both sides through pct_label: .0f utilization could
                             # display an impossible "100% < 99.9%".
-                            detail=(
-                                f"{pct_label(utilization)}% < "
-                                f"{pct_label(settings.threshold)}%"
-                            ),
+                            detail=self._below_threshold_detail(current, usage),
                         )
                     )
                     return TickOutcome.NO_ACTION
-                # consume-first: below the threshold we still proactively move to
-                # whichever account's weekly window resets soonest, to burn the
-                # most-perishable quota first. Candidate selection decides whether
-                # a sooner-resetting account with room actually exists.
-                trigger = "consume-first"
+                else:
+                    # consume-first: below the threshold we still proactively
+                    # move to whichever account's weekly window resets soonest,
+                    # to burn the most-perishable quota first. Candidate
+                    # selection decides whether a sooner-resetting account
+                    # with room actually exists.
+                    trigger = "consume-first"
+            elif active_headroom <= 0:
+                # At its limit — the provider's, or the slot's own hard limit
+                # (rules.py). Both are escapes, not proactive moves; the name
+                # says which so the log never claims a 50% account "hit 100%".
+                value = usage.get(current)
+                raw = binding_pct(value if isinstance(value, dict) else None, self._models)
+                trigger = "hard-limit" if raw is not None and raw < 100.0 else "at-limit"
             else:
-                trigger = "at-limit" if active_headroom <= 0 else "proactive"
+                trigger = "proactive"
         else:
             if usage.get(current) == USAGE_TOKEN_EXPIRED:
                 # Expired and the refresh could not complete this pass (lock
@@ -1046,7 +1159,10 @@ class AutoSwitchEngine:
                 return TickOutcome.NO_ACTION
             trigger = "failover"
 
-        if trigger in ("proactive", "consume-first") and self._in_cooldown(state):
+        if (
+            trigger in ("proactive", "consume-first", "priority")
+            and self._in_cooldown(state)
+        ):
             self._emit(NoSwitchEvent(reason="cooldown"))
             return TickOutcome.NO_ACTION
 
@@ -1084,10 +1200,7 @@ class AutoSwitchEngine:
             self._emit(
                 NoSwitchEvent(
                     reason="below-threshold",
-                    detail=(
-                        f"{pct_label(100.0 - active_headroom)}% < "
-                        f"{pct_label(settings.threshold)}%"
-                    ),
+                    detail=self._below_threshold_detail(current, usage),
                 )
             )
             return TickOutcome.NO_ACTION
@@ -1202,7 +1315,7 @@ class AutoSwitchEngine:
                 fetch={current, *candidates}
             )
             usage = {num: entry.decision_value() for num, entry in entries.items()}
-            headroom = _headroom_by_account(usage, self._models)
+            headroom = self._capped_headroom_by_account(usage)
             active_headroom = headroom.get(current)
             decided_now = self.clock()
             ordered, any_known, active_reset_ts = _rank(
@@ -1467,7 +1580,7 @@ class AutoSwitchEngine:
         left, or only a different active?
         """
         came_from = state.get("lastSwitchFrom")
-        if trigger not in ("proactive", "consume-first") or came_from is None:
+        if trigger not in ("proactive", "consume-first", "priority") or came_from is None:
             return None
         # Only while we are still standing where that switch put us. A manual
         # switch away already undid the move, so there is nothing left to
@@ -1493,7 +1606,7 @@ class AutoSwitchEngine:
                     return None               # beats us outright; not a flip
             elif (
                 settings is not None
-                and left_headroom > 100.0 - settings.threshold
+                and left_headroom > 100.0 - self._threshold_for(barred, settings)
             ):
                 # An unreadable active must not be silently scored as "the
                 # peer does not beat it" -- same landing-eligible fallback
@@ -1669,7 +1782,7 @@ class AutoSwitchEngine:
             # when a nearer window starts binding, never as a side effect
             # of the active spending down -- the failure mode a bare
             # dominance leg has, guarded directly in the mutation table.
-            if h is not None and h > 100.0 - settings.threshold:
+            if h is not None and h > 100.0 - self._threshold_for(barred, settings):
                 return True
             peer_recovery_ts = _binding_recovery_ts(usage.get(barred), self._models, now)
             active_recovery_ts = _binding_recovery_ts(usage.get(current), self._models, now)
@@ -1735,7 +1848,7 @@ class AutoSwitchEngine:
             if active_headroom is not None:
                 if h > active_headroom * HORIZON_HEADROOM_RATIO + SPENT_HEADROOM_PCT:
                     return True
-            elif h > 100.0 - settings.threshold:
+            elif h > 100.0 - self._threshold_for(barred, settings):
                 return True
         if (
             isinstance(left_headroom, (int, float))
@@ -1790,8 +1903,8 @@ class AutoSwitchEngine:
         # account is at/over the threshold, so a single healthy peer still
         # wins the normal way, and RECOVERY_HYSTERESIS_S below replaces the
         # percentage-point margin so two accounts in the 90s cannot ping-pong.
-        all_above = _every_account_above_threshold(
-            oauth_candidates, headroom, active_headroom, settings.threshold
+        all_above = _every_account_above_own_threshold(
+            oauth_candidates, headroom, active_headroom, current, self._threshold_for
         )
         # "Is anything worth having?" — the most headroom any candidate with a
         # READABLE row offers. Two exclusions and no others:
@@ -1843,13 +1956,18 @@ class AutoSwitchEngine:
                 if all_above
                 else 0.0
             )
-            if trigger in ("proactive", "consume-first"):
-                # Landing must be healthy: an account at/over the threshold
-                # would re-trigger on the very next tick. At-limit and failover
-                # are escapes that skip this whole block — any account with real
-                # headroom beats a blocked or dead one.
-                if (100.0 - h) >= settings.threshold and not all_above:
+            if trigger in ("proactive", "consume-first", "priority"):
+                # Landing must be healthy: an account at/over ITS threshold
+                # would re-trigger on the very next tick. At-limit, hard-limit
+                # and failover are escapes that skip this whole block — any
+                # account with real headroom beats a blocked or dead one.
+                if (100.0 - h) >= self._threshold_for(num) and not all_above:
                     continue
+                if (
+                    trigger == "priority"
+                    and self._rule_for(num).priority >= self._rule_for(current).priority
+                ):
+                    continue  # a "return" only ever lands on a more-preferred slot
                 if all_above:
                     # Checked before the strategies, because with nothing below
                     # the threshold the strategy question is moot: consume-first
@@ -1894,7 +2012,10 @@ class AutoSwitchEngine:
                                 and recovery_ts
                                 < active_recovery_ts - RECOVERY_HYSTERESIS_S
                             ):
-                                fallback.append(((0, recovery_ts, -h), num))
+                                fallback.append((
+                                    (self._rule_for(num).priority, 0, recovery_ts, -h),
+                                    num,
+                                ))
                             continue
                 elif consume_first:
                     # Purely proactive on reset ordering: below the threshold,
@@ -1907,13 +2028,16 @@ class AutoSwitchEngine:
                         or reset_ts >= active_reset_ts
                     ):
                         continue
-                elif active_headroom is not None:
+                elif active_headroom is not None and trigger != "priority":
                     # best: the candidate must beat the active account by the
                     # full hysteresis margin (a one-way move like 99%→89%
-                    # qualifies; near-line pairs can't flap back).
+                    # qualifies; near-line pairs can't flap back). A priority
+                    # return is about preference, not margin: its anti-flap
+                    # is the landing gate above plus cooldown and the
+                    # no-return bar.
                     if h - active_headroom < settings.hysteresis_pct:
                         continue
-            if all_above and trigger in ("proactive", "consume-first"):
+            if all_above and trigger in ("proactive", "consume-first", "priority"):
                 # Ranked on the axis its own gate decided, and TIERED so the two
                 # stay comparable: a candidate returning inside the horizon
                 # beats one that does not, whatever its headroom. Untiered, the
@@ -1944,7 +2068,9 @@ class AutoSwitchEngine:
                 key = (reset_ts if reset_ts is not None else float("inf"), -h)
             else:
                 key = (-h,)
-            qualifying.append((key, num))
+            # Priority (rules.py) leads every key: a more-preferred slot wins
+            # whatever the strategy says, and the strategy orders within a tier.
+            qualifying.append(((self._rule_for(num).priority, *key), num))
         # Ascending by the strategy's key; list order (sequence order) breaks ties.
         qualifying = qualifying or fallback
         qualifying.sort(key=lambda t: t[0])
@@ -2052,13 +2178,19 @@ class AutoSwitchEngine:
         usage = {num: entry.decision_value() for num, entry in entries.items()}
 
         active_value = usage.get(current)
-        active_headroom = oauth.account_headroom(
-            active_value if isinstance(active_value, dict) else None, self._models
+        active_headroom = cap_headroom(
+            oauth.account_headroom(
+                active_value if isinstance(active_value, dict) else None, self._models
+            ),
+            self._rule_for(current),
         )
         # The caller's tick-snapshotted threshold, so one tick fetches and
-        # decides on the same value even if apply_threshold() lands mid-tick.
+        # decides on the same value even if apply_threshold() lands mid-tick;
+        # mapped onto the active slot's own rule (capped scale) like the
+        # decision it feeds.
         if threshold is None:
             threshold = self.settings.threshold
+        threshold = effective_threshold(self._rule_for(current), threshold)
         escalate = bool(candidates) and (
             (active_headroom is None and active_value != USAGE_TOKEN_EXPIRED)
             or (
@@ -2093,7 +2225,7 @@ class AutoSwitchEngine:
             )
             usage = {num: entry.decision_value() for num, entry in entries.items()}
 
-        headroom = _headroom_by_account(usage, self._models)
+        headroom = self._capped_headroom_by_account(usage)
         return entries, usage, headroom
 
     def _perform(
@@ -2124,7 +2256,10 @@ class AutoSwitchEngine:
         # state lock.
         with self._state_lock():
             state = self._read_state()
-            if trigger in ("proactive", "consume-first") and self._in_cooldown(state):
+            if (
+                trigger in ("proactive", "consume-first", "priority")
+                and self._in_cooldown(state)
+            ):
                 self._emit(NoSwitchEvent(reason="cooldown"))
                 return TickOutcome.NO_ACTION
 

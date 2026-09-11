@@ -6894,3 +6894,154 @@ class TestFreshenRoutesThroughGate:
         assert gate_calls["args"][0] == "2"
         assert "called" not in direct, "freshen must not POST outside the gate"
 
+
+
+class TestAccountRules:
+    """Per-account rules (rules.py) through the engine, told as the story
+    they were built for: two accounts of my own (priority 1, hard limit 100)
+    and a friend's backup (priority 2, hard limit 50) — used only when both
+    of mine are out, and only up to half."""
+
+    @pytest.fixture
+    def fleet(self, harness):
+        sw = harness.switcher
+        sw.set_account_rule("1", swap_limit=95.0, quiet=True)
+        sw.set_account_rule("2", swap_limit=95.0, quiet=True)
+        sw.set_account_rule(
+            "3", swap_limit=95.0, hard_limit=50.0, priority=2, quiet=True
+        )
+        return harness
+
+    @staticmethod
+    def _reasons(h) -> list[str]:
+        return [e.reason for e in h.events if isinstance(e, NoSwitchEvent)]
+
+    @staticmethod
+    def _switch(h) -> SwitchEvent:
+        return next(e for e in h.events if isinstance(e, SwitchEvent))
+
+    def test_own_accounts_share_a_tier_and_priority_beats_headroom(self, fleet):
+        # 1 at its swap limit. On headroom alone the backup (5% used, 45 pts
+        # left under its cap) beats my other account (70%, 30 pts); priority
+        # keeps me on my own accounts while one of them has room.
+        out = fleet.tick_with_usage({"1": _usage(95), "2": _usage(70), "3": _usage(5)})
+        assert out is TickOutcome.SWITCHED
+        assert fleet.active_number() == 2
+        assert self._switch(fleet).trigger == "proactive"
+
+    def test_falls_back_to_the_backup_only_when_both_own_are_out(self, fleet):
+        out = fleet.tick_with_usage({"1": _usage(96), "2": _usage(97), "3": _usage(10)})
+        assert out is TickOutcome.SWITCHED
+        assert fleet.active_number() == 3
+
+    def test_backup_below_its_hard_limit_is_kept_while_own_are_spent(self, fleet):
+        fleet.make_live("c@example.com", 3)
+        out = fleet.tick_with_usage({"1": _usage(96), "2": _usage(97), "3": _usage(30)})
+        assert out is TickOutcome.NO_ACTION
+        assert self._reasons(fleet) == ["below-threshold"]
+        detail = next(e.detail for e in fleet.events if isinstance(e, NoSwitchEvent))
+        assert detail == "30% < 50% hard limit"  # raw numbers, naming what binds
+
+    def test_hard_limit_forces_a_return_to_an_own_account(self, fleet):
+        # The backup reaches 50%: leave at once, even though 95% (its swap
+        # limit) is nowhere near — and land on the own account with the most
+        # room, even though both are past their swap limits.
+        fleet.make_live("c@example.com", 3)
+        out = fleet.tick_with_usage({"1": _usage(96), "2": _usage(97), "3": _usage(50)})
+        assert out is TickOutcome.SWITCHED
+        assert fleet.active_number() == 1
+        assert self._switch(fleet).trigger == "hard-limit"
+
+    def test_never_switches_onto_the_backup_at_its_hard_limit(self, fleet):
+        # 1 at its swap limit, 2 not healthy, 3 at its hard limit: nothing
+        # qualifies, and that is NOT "all exhausted" (normal cadence keeps
+        # the at-limit escape reachable).
+        out = fleet.tick_with_usage({"1": _usage(96), "2": _usage(97), "3": _usage(50)})
+        assert out is TickOutcome.BLOCKED
+        assert fleet.active_number() == 1
+        assert self._reasons(fleet) == ["no-qualifying-candidate"]
+        assert not any(isinstance(e, AllExhaustedEvent) for e in fleet.events)
+        # The escape itself still refuses the backup: 1 hits 100 → 2 (3 pts).
+        fleet.events.clear()
+        out = fleet.tick_with_usage({"1": _usage(100), "2": _usage(97), "3": _usage(50)})
+        assert out is TickOutcome.SWITCHED
+        assert fleet.active_number() == 2
+        assert self._switch(fleet).trigger == "at-limit"
+        # Both own accounts spent + backup capped = all exhausted, not a
+        # landing on the backup.
+        fleet.events.clear()
+        out = fleet.tick_with_usage({"1": _usage(100), "2": _usage(100), "3": _usage(50)})
+        assert out is TickOutcome.BLOCKED
+        assert any(isinstance(e, AllExhaustedEvent) for e in fleet.events)
+        assert fleet.active_number() == 2
+
+    def test_returns_to_an_own_account_once_it_is_healthy_again(self, fleet):
+        fleet.make_live("c@example.com", 3)
+        out = fleet.tick_with_usage({"1": _usage(20), "2": _usage(97), "3": _usage(30)})
+        assert out is TickOutcome.SWITCHED
+        assert fleet.active_number() == 1
+        assert self._switch(fleet).trigger == "priority"
+
+    def test_priority_return_respects_cooldown_and_the_no_return_bar(self, fleet):
+        # 1 -> 3 because both own accounts were out.
+        assert fleet.tick_with_usage(
+            {"1": _usage(96), "2": _usage(97), "3": _usage(10)}
+        ) is TickOutcome.SWITCHED
+        assert fleet.active_number() == 3
+        # Still out: stay on the backup.
+        fleet.events.clear()
+        out = fleet.tick_with_usage({"1": _usage(96), "2": _usage(97), "3": _usage(12)})
+        assert out is TickOutcome.NO_ACTION
+        assert self._reasons(fleet) == ["below-threshold"]
+        # 1 reset (5%): a return is due, but inside the cooldown window...
+        fleet.events.clear()
+        out = fleet.tick_with_usage({"1": _usage(5), "2": _usage(97), "3": _usage(12)})
+        assert out is TickOutcome.NO_ACTION
+        assert self._reasons(fleet) == ["cooldown"]
+        # ...and once it lapses, back to my main account.
+        fleet.clock.advance(fleet.settings.cooldown_seconds + 1)
+        fleet.events.clear()
+        out = fleet.tick_with_usage({"1": _usage(5), "2": _usage(97), "3": _usage(12)})
+        assert out is TickOutcome.SWITCHED
+        assert fleet.active_number() == 1
+        assert self._switch(fleet).trigger == "priority"
+
+    def test_default_rules_leave_the_old_behaviour_untouched(self, harness):
+        out = harness.tick_with_usage({"1": _usage(95), "2": _usage(40), "3": _usage(20)})
+        assert out is TickOutcome.SWITCHED
+        assert harness.active_number() == 3
+        assert self._switch(harness).trigger == "proactive"
+
+    def test_swap_limit_below_the_global_threshold_leaves_earlier(self, harness):
+        harness.switcher.set_account_rule("1", swap_limit=60.0, quiet=True)
+        out = harness.tick_with_usage({"1": _usage(60), "2": _usage(40), "3": _usage(20)})
+        assert out is TickOutcome.SWITCHED
+        assert harness.active_number() == 3
+        assert self._switch(harness).trigger == "proactive"
+
+    def test_rules_are_re_read_every_tick(self, harness):
+        assert harness.tick_with_usage(
+            {"1": _usage(50), "2": _usage(10), "3": _usage(10)}
+        ) is TickOutcome.NO_ACTION
+        harness.switcher.set_account_rule("1", hard_limit=50.0, quiet=True)
+        harness.events.clear()
+        out = harness.tick_with_usage({"1": _usage(50), "2": _usage(10), "3": _usage(10)})
+        assert out is TickOutcome.SWITCHED
+        assert self._switch(harness).trigger == "hard-limit"
+
+    def test_manual_best_strategy_honours_hard_limit_and_priority(self, fleet):
+        # `cswap switch --strategy best`: never onto the capped backup, and a
+        # more-preferred account with room wins over a roomier backup.
+        sw = fleet.switcher
+        target, note = sw._select_best_switchable(
+            "1", (), {"1": _usage(96), "2": _usage(97), "3": _usage(50)}
+        )
+        assert (target, note) == (None, "stay")  # 2 has less room, 3 is capped
+        target, note = sw._select_best_switchable(
+            "3", (), {"1": _usage(60), "2": _usage(97), "3": _usage(10)}
+        )
+        assert (target, note) == ("1", "")  # priority 1 with room beats staying on p2
+        target, note = sw._select_best_switchable(
+            "3", (), {"1": _usage(96), "2": _usage(97), "3": _usage(10)}
+        )
+        assert (target, note) == (None, "stay")  # no own account is better than 40 pts left

@@ -390,12 +390,15 @@ class AutoScreen(Screen):
         # displayed ranking can never disagree with the account it picks.
         palette = Palette.from_theme(self.app.current_theme)
         models = parse_model_names(self._settings.model) if self._settings else ()
-        ranked: list[tuple[float, str]] = []  # (sort key: pct used, number)
+        # (priority, pct used) — the same order the engine ranks in: a
+        # more-preferred slot first, usage within a tier, capped/unknown last.
+        ranked: list[tuple[tuple[int, float], str]] = []
         lines: dict[str, Text] = {}
         for acc in snap.accounts:
             if acc.number == active_number or not acc.switchable:
                 continue
             pct = binding_pct(acc.usage.last_good, models)
+            rule = acc.rule
             entry = Text()
             entry.append(f"\n  {acc.number:>2}  ", style=palette.foreground)
             entry.append(acc.email, style=palette.foreground)
@@ -403,13 +406,23 @@ class AutoScreen(Screen):
                 entry.append(
                     f"  {data.sentinel_label(acc.usage.sentinel)}", style=palette.muted
                 )
-                ranked.append((998.0, acc.number))
+                ranked.append(((rule.priority, 998.0), acc.number))
             elif pct is None:
                 entry.append("  usage unknown", style=palette.muted)
-                ranked.append((999.0, acc.number))
+                ranked.append(((rule.priority, 999.0), acc.number))
+            elif rule.hard_limit < 100.0 and pct >= rule.hard_limit:
+                # Only the slot's OWN cap is called a hard limit; an account
+                # at the provider's 100% reads as plain usage, like before.
+                entry.append(
+                    f"  {pct:3.0f}% used · at hard limit {rule.hard_limit:.10g}%",
+                    style=palette.sev_crit,
+                )
+                ranked.append(((rule.priority, 997.0), acc.number))
             else:
                 entry.append(f"  {pct:3.0f}% used", style=palette.severity(pct))
-                ranked.append((pct, acc.number))
+                ranked.append(((rule.priority, pct), acc.number))
+            if rule.priority != 1:
+                entry.append(f"  p{rule.priority}", style=palette.muted)
             lines[acc.number] = entry
 
         text = Text()
@@ -417,6 +430,6 @@ class AutoScreen(Screen):
         if not ranked:
             text.append("\n  no other switchable accounts", style=palette.muted)
             return text
-        for _pct, number in sorted(ranked):
+        for _key, number in sorted(ranked):
             text.append(lines[number])
         return text

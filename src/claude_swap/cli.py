@@ -498,6 +498,160 @@ Examples:
         sys.exit(130)
 
 
+def _rule_command(argv: list[str]) -> None:
+    """Handle `cswap rule [NUM|EMAIL] [--swap-limit] [--hard-limit] [--priority] [--reset]`.
+
+    Bare `cswap rule` lists every account's rule. Pre-dispatched before the
+    main parser like `alias` (a positional subcommand can't live in the main
+    parser's mutually-exclusive flag group).
+    """
+    from claude_swap.rules import (
+        KEEP,
+        parse_hard_limit,
+        parse_priority,
+        parse_swap_limit,
+    )
+    from claude_swap.settings import load_settings
+
+    parser = argparse.ArgumentParser(
+        prog=f"{_prog_name()} rule",
+        description=(
+            "Per-account switching rules. swap limit: where auto-switch starts "
+            "looking for a better account while this one is active (default: "
+            "autoswitch.threshold). hard limit: never use the account past this "
+            "— not a switch target, and left at once when active (default 100). "
+            "priority: 1 is most preferred; lower numbers win, ties route by "
+            "usage, and the engine returns to a higher-priority account as soon "
+            "as it is healthy again (default 1)."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  cswap rule                                  # list every account's rule
+  cswap rule 3 --priority 2 --hard-limit 50   # a backup: only when others are out, only to 50%
+  cswap rule 1 --swap-limit 95
+  cswap rule 3 --hard-limit off               # clear one field
+  cswap rule 3 --reset                        # clear all three
+        """,
+    )
+    parser.add_argument(
+        "account",
+        nargs="?",
+        metavar="NUM|EMAIL",
+        help="Account to edit (number, email, or alias). Omit to list rules.",
+    )
+    parser.add_argument(
+        "--swap-limit", metavar="PCT",
+        help="1-100, or 'off' for the global threshold",
+    )
+    parser.add_argument(
+        "--hard-limit", metavar="PCT", help="1-100, or 'off' (= 100)",
+    )
+    parser.add_argument(
+        "--priority", metavar="N", help="1-99 (1 = most preferred), or 'off' (= 1)",
+    )
+    parser.add_argument(
+        "--reset", action="store_true", help="Clear all three (defaults)",
+    )
+    parser.add_argument("--json", action="store_true", help="Machine-readable output")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    args = parser.parse_args(argv)
+
+    editing = args.reset or any(
+        v is not None for v in (args.swap_limit, args.hard_limit, args.priority)
+    )
+    if args.account is None and editing:
+        parser.error("NUM|EMAIL is required when setting a rule")
+    if args.account is not None and not editing:
+        parser.error(
+            "nothing to set: pass --swap-limit / --hard-limit / --priority "
+            "(or --reset)"
+        )
+
+    try:
+        switcher = ClaudeAccountSwitcher(debug=args.debug)
+        _guard_root(switcher)
+        threshold = load_settings(switcher.backup_dir).threshold
+
+        if args.account is None:
+            data = switcher._get_sequence_data() or {}
+            rules = switcher.account_rules()
+            rows = [
+                (
+                    str(num),
+                    (data.get("accounts", {}).get(str(num)) or {}).get("email", ""),
+                    rules.get(str(num)),
+                )
+                for num in data.get("sequence", [])
+            ]
+            if args.json:
+                print(json.dumps({
+                    "schemaVersion": 1,
+                    "threshold": threshold,
+                    "rules": [
+                        {
+                            "number": int(num),
+                            "email": email,
+                            "swapLimit": rule.swap_limit,
+                            "hardLimit": rule.hard_limit,
+                            "priority": rule.priority,
+                        }
+                        for num, email, rule in rows
+                        if rule is not None
+                    ],
+                }, indent=2))
+                return
+            if not rows:
+                print(dimmed("No accounts are managed yet."))
+                return
+            print(bolded("Account rules:"))
+            for num, email, rule in rows:
+                if rule is None:
+                    continue
+                swap = (
+                    f"{rule.swap_limit:.10g}%"
+                    if rule.swap_limit is not None
+                    else f"{threshold:.10g}% (threshold)"
+                )
+                hard = f"{rule.hard_limit:.10g}%"
+                print(
+                    f"  {num}: {email}  "
+                    f"{muted(f'priority {rule.priority} · swap {swap} · hard {hard}')}"
+                    + ("" if not rule.is_default else f"  {dimmed('(defaults)')}")
+                )
+            return
+
+        try:
+            swap = KEEP if args.swap_limit is None else parse_swap_limit(args.swap_limit)
+            hard = KEEP if args.hard_limit is None else parse_hard_limit(args.hard_limit)
+            prio = KEEP if args.priority is None else parse_priority(args.priority)
+        except ValueError as exc:
+            parser.error(str(exc))
+        num, email, rule = switcher.set_account_rule(
+            args.account,
+            swap_limit=swap,
+            hard_limit=hard,
+            priority=prio,
+            reset=args.reset,
+            quiet=args.json,
+        )
+        if args.json:
+            print(json.dumps({
+                "schemaVersion": 1,
+                "number": int(num),
+                "email": email,
+                "swapLimit": rule.swap_limit,
+                "hardLimit": rule.hard_limit,
+                "priority": rule.priority,
+            }, indent=2))
+    except ClaudeSwitchError as e:
+        error(f"Error: {e}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print(f"\n{dimmed('Operation cancelled')}")
+        sys.exit(130)
+
+
 def _alias_command(argv: list[str]) -> None:
     """Handle `cswap alias [NUM|EMAIL] [NAME] [--unset]`.
 
@@ -1011,6 +1165,9 @@ def main() -> None:
     if argv and argv[0] == "alias":
         _alias_command(argv[1:])
         return
+    if argv and argv[0] in ("rule", "rules"):
+        _rule_command(argv[1:])
+        return
     if argv and argv[0] == "swap":
         _swap_command(argv[1:])
         return
@@ -1053,6 +1210,8 @@ Commands:
   %(prog)s alias <num|email> <name>   set a short alias for an account
   %(prog)s alias <num|email> --unset  remove an account's alias
   %(prog)s alias                      list all aliases
+  %(prog)s rule <num|email> [...]     set an account's swap/hard limit and priority
+  %(prog)s rule                       list every account's rule
   %(prog)s swap <a> <b>               exchange two accounts' slot numbers
   %(prog)s move <a> <slot>            assign an account to a slot (swaps if taken)
   %(prog)s auto                       auto-switch when nearing rate limits
