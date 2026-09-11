@@ -1973,7 +1973,13 @@ class TestAccountRulesUI:
 
 @pytest.mark.asyncio
 class TestAccountsPanelCap:
-    """CSWAP_MAX_ACCOUNT_CARDS — the menu bar panel's fixed-height host."""
+    """CSWAP_MAX_ACCOUNT_CARDS — the menu bar panel's fixed-height host.
+
+    The cap lives on ``#accounts-scroll`` (a VerticalScroll) rather than on
+    the AccountsPanel Static inside it: Textual only routes the mouse wheel
+    to widgets with a layout or children, so a capped Static showed a
+    scrollbar and ignored every wheel event.
+    """
 
     @staticmethod
     def _five(tmp_path):
@@ -1992,28 +1998,50 @@ class TestAccountsPanelCap:
         app = make_app(self._five(tmp_path))
         async with app.run_test(size=(100, 60)) as pilot:
             await settle(pilot)
-            panel = app.screen.query_one("#accounts-panel")
+            scroll = app.screen.query_one("#accounts-scroll")
             assert app.max_account_cards is None
-            assert panel.styles.max_height is None
+            assert scroll.styles.max_height is None
             # all five full cards on screen — and the constants the cap (and the
             # Swift panel) are built on match what a card really renders to
-            assert panel.outer_size.height == PANEL_CHROME + 5 * CARD_ROWS + 4 * CARD_GAP
+            assert scroll.outer_size.height == PANEL_CHROME + 5 * CARD_ROWS + 4 * CARD_GAP
+            assert scroll.max_scroll_y == 0
 
-    async def test_capped_panel_stops_at_n_cards_and_scrolls(self, tmp_path, monkeypatch):
+    async def test_capped_panel_stops_at_n_cards(self, tmp_path, monkeypatch):
         from claude_swap.tui.dashboard import accounts_panel_max_height
 
         monkeypatch.setenv("CSWAP_MAX_ACCOUNT_CARDS", "3")
         app = make_app(self._five(tmp_path))
         async with app.run_test(size=(100, 60)) as pilot:
             await settle(pilot)
-            panel = app.screen.query_one("#accounts-panel")
+            scroll = app.screen.query_one("#accounts-scroll")
             assert app.max_account_cards == 3
-            assert panel.outer_size.height == accounts_panel_max_height(3) == 17
-            assert str(panel.styles.overflow_y) == "auto"
-            # more content than fits: the panel scrolls rather than the menu moving
-            assert panel.max_scroll_y > 0
+            assert scroll.outer_size.height == accounts_panel_max_height(3) == 17
+            # more content than fits: the container scrolls, the menu stays put
+            assert scroll.max_scroll_y > 0
             menu_y = app.screen.query_one("#menu").region.y
             assert menu_y < accounts_panel_max_height(3) + 4
+
+    async def test_capped_panel_scrolls_with_the_mouse_wheel(self, tmp_path, monkeypatch):
+        from textual.events import MouseScrollDown, MouseScrollUp
+
+        monkeypatch.setenv("CSWAP_MAX_ACCOUNT_CARDS", "3")
+        app = make_app(self._five(tmp_path))
+        async with app.run_test(size=(100, 60)) as pilot:
+            await settle(pilot)
+            scroll = app.screen.query_one("#accounts-scroll")
+            assert scroll.allow_vertical_scroll
+            assert scroll.scroll_y == 0
+            await pilot._post_mouse_events([MouseScrollDown], "#accounts-scroll", offset=(10, 5), times=3)
+            await pilot.pause()
+            assert scroll.scroll_y > 0
+            # the last card is reachable
+            for _ in range(20):
+                await pilot._post_mouse_events([MouseScrollDown], "#accounts-scroll", offset=(10, 5))
+            await pilot.pause()
+            assert scroll.scroll_y == scroll.max_scroll_y
+            await pilot._post_mouse_events([MouseScrollUp], "#accounts-scroll", offset=(10, 5), times=3)
+            await pilot.pause()
+            assert scroll.scroll_y < scroll.max_scroll_y
 
     async def test_garbage_cap_is_ignored(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CSWAP_MAX_ACCOUNT_CARDS", "lots")
@@ -2021,4 +2049,4 @@ class TestAccountsPanelCap:
         async with app.run_test(size=(100, 60)) as pilot:
             await settle(pilot)
             assert app.max_account_cards is None
-            assert app.screen.query_one("#accounts-panel").styles.max_height is None
+            assert app.screen.query_one("#accounts-scroll").styles.max_height is None
