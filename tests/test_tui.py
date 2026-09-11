@@ -1969,3 +1969,56 @@ class TestAccountRulesUI:
             assert "at hard limit 50%" in plain
             assert plain.index("user2@example.com") < plain.index("user4@example.com")
             assert "p2" in plain
+
+
+@pytest.mark.asyncio
+class TestAccountsPanelCap:
+    """CSWAP_MAX_ACCOUNT_CARDS — the menu bar panel's fixed-height host."""
+
+    @staticmethod
+    def _five(tmp_path):
+        # a per-model row on every card: the 4-row card the cap is sized for
+        entry = make_entry(50.0, 60.0, scoped=[("Fable", 40.0)])
+        return FakeSwitcher(
+            [make_account(1, active=True, entry=entry)]
+            + [make_account(n, entry=entry) for n in range(2, 6)],
+            tmp_path,
+        )
+
+    async def test_uncapped_panel_grows_with_every_account(self, tmp_path, monkeypatch):
+        from claude_swap.tui.dashboard import CARD_GAP, CARD_ROWS, PANEL_CHROME
+
+        monkeypatch.delenv("CSWAP_MAX_ACCOUNT_CARDS", raising=False)
+        app = make_app(self._five(tmp_path))
+        async with app.run_test(size=(100, 60)) as pilot:
+            await settle(pilot)
+            panel = app.screen.query_one("#accounts-panel")
+            assert app.max_account_cards is None
+            assert panel.styles.max_height is None
+            # all five full cards on screen — and the constants the cap (and the
+            # Swift panel) are built on match what a card really renders to
+            assert panel.outer_size.height == PANEL_CHROME + 5 * CARD_ROWS + 4 * CARD_GAP
+
+    async def test_capped_panel_stops_at_n_cards_and_scrolls(self, tmp_path, monkeypatch):
+        from claude_swap.tui.dashboard import accounts_panel_max_height
+
+        monkeypatch.setenv("CSWAP_MAX_ACCOUNT_CARDS", "3")
+        app = make_app(self._five(tmp_path))
+        async with app.run_test(size=(100, 60)) as pilot:
+            await settle(pilot)
+            panel = app.screen.query_one("#accounts-panel")
+            assert app.max_account_cards == 3
+            assert panel.outer_size.height == accounts_panel_max_height(3) == 17
+            assert str(panel.styles.overflow_y) == "auto"
+            # more content than fits: the panel scrolls rather than the menu moving
+            assert panel.max_scroll_y > 0
+            menu_y = app.screen.query_one("#menu").region.y
+            assert menu_y < accounts_panel_max_height(3) + 4
+
+    async def test_garbage_cap_is_ignored(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CSWAP_MAX_ACCOUNT_CARDS", "lots")
+        app = make_app(self._five(tmp_path))
+        async with app.run_test(size=(100, 60)) as pilot:
+            await settle(pilot)
+            assert app.max_account_cards is None
+            assert app.screen.query_one("#accounts-panel").styles.max_height is None

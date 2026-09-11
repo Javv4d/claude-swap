@@ -8,6 +8,8 @@ loop never touches file locks, keychain subprocesses, or the network.
 
 from __future__ import annotations
 
+import os
+
 import time
 from dataclasses import replace
 from functools import partial
@@ -34,6 +36,19 @@ from claude_swap.tui.modals import (
     TokenForm,
 )
 from claude_swap.tui.theme import CSWAP_DARK, CSWAP_LIGHT
+
+
+MAX_ACCOUNT_CARDS_ENV = "CSWAP_MAX_ACCOUNT_CARDS"
+
+
+def _max_account_cards_from_env(environ=None) -> int | None:
+    """Parse ``CSWAP_MAX_ACCOUNT_CARDS``; anything but a positive int is unset."""
+    raw = (os.environ if environ is None else environ).get(MAX_ACCOUNT_CARDS_ENV, "")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
 
 
 class CswapApp(App):
@@ -94,6 +109,10 @@ class CswapApp(App):
         except Exception:
             self._theme_name = "auto"
             self.inactive_cards = "full"
+        # Cap on full account cards the dashboard shows before its accounts
+        # panel scrolls. Set by the menu bar panel (panel.py), whose popover
+        # has a fixed height; unset (the terminal) means "show them all".
+        self.max_account_cards = _max_account_cards_from_env()
 
     def on_mount(self) -> None:
         self.register_theme(CSWAP_DARK)

@@ -1818,3 +1818,126 @@ def test_importing_the_module_allocates_no_temp_dir(tmp_path, tmp_path_factory):
     home = Path(_subprocess_env()["HOME"])
     assert home.is_dir(), f"the isolated HOME is not a real directory: {home}"
     assert home.is_relative_to(tmp_path_factory.getbasetemp()), f"{home} escapes basetemp"
+
+
+class TestPanelCli:
+    """`cswap panel` — the menu bar drop-down — routes to panel.py."""
+
+    def _harness(self, monkeypatch, argv, *, platform="darwin"):
+        seen: dict = {}
+
+        class _FakeSwitcher:
+            backup_dir = Path("/tmp/cswap-backup")
+
+            def __init__(self, *a, **k):
+                pass
+
+            def _is_running_in_container(self):
+                return False
+
+            def add_account(self, slot=None, alias=None):
+                seen["added"] = (slot, alias)
+
+        def _record(name, payload):
+            def _call(*a, **k):
+                seen["called"] = name
+                seen["args"] = (a, k)
+                return payload
+
+            return _call
+
+        monkeypatch.setattr(cli, "ClaudeAccountSwitcher", _FakeSwitcher)
+        monkeypatch.setattr(sys, "argv", argv)
+        monkeypatch.setattr(sys, "platform", platform)
+        monkeypatch.setattr(cli.os, "geteuid", lambda: 1000, raising=False)
+        monkeypatch.setattr(
+            "claude_swap.panel.install_service",
+            _record(
+                "install",
+                {"label": "com.cswap.panel", "plist": "/tmp/p.plist",
+                 "program": ["/tmp/CswapPanel"], "stdout_log": "/tmp/o.log",
+                 "stderr_log": "/tmp/e.log"},
+            ),
+        )
+        monkeypatch.setattr(
+            "claude_swap.panel.uninstall_service",
+            _record("uninstall", {"label": "com.cswap.panel", "was_loaded": True, "removed_plist": True}),
+        )
+        monkeypatch.setattr(
+            "claude_swap.panel.service_status",
+            _record("status", {"label": "com.cswap.panel", "installed": True, "loaded": True,
+                               "state": "running", "pid": 77, "plist": "/tmp/p.plist"}),
+        )
+        monkeypatch.setattr("claude_swap.panel.run_foreground", _record("foreground", 0))
+        monkeypatch.setattr("claude_swap.panel.offer", _record("offer", False))
+        return seen
+
+    def test_install_service_builds_and_installs_against_the_backup_root(self, monkeypatch, capsys):
+        seen = self._harness(monkeypatch, ["cswap", "panel", "--install-service"])
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 0
+        assert seen["called"] == "install"
+        assert seen["args"][0][0] == Path("/tmp/cswap-backup")
+        out = capsys.readouterr().out
+        assert "Menu bar panel installed" in out and '"CS"' in out
+
+    def test_uninstall_service(self, monkeypatch, capsys):
+        seen = self._harness(monkeypatch, ["cswap", "panel", "--uninstall-service"])
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 0
+        assert seen["called"] == "uninstall"
+        assert "Menu bar panel removed" in capsys.readouterr().out
+
+    def test_service_status(self, monkeypatch, capsys):
+        seen = self._harness(monkeypatch, ["cswap", "panel", "--service-status"])
+        with pytest.raises(SystemExit):
+            cli.main()
+        assert seen["called"] == "status"
+        assert "running (pid 77)" in capsys.readouterr().out
+
+    def test_bare_panel_runs_in_the_foreground(self, monkeypatch):
+        seen = self._harness(monkeypatch, ["cswap", "panel"])
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 0
+        assert seen["called"] == "foreground"
+
+    def test_panel_refuses_off_macos(self, monkeypatch, capsys):
+        seen = self._harness(monkeypatch, ["cswap", "panel"], platform="linux")
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 1
+        assert "called" not in seen
+        assert "only available on macOS" in capsys.readouterr().err
+
+    def test_service_flags_accept_panel(self, monkeypatch):
+        # the guard that rejects `cswap list --install-service` must let panel through
+        seen = self._harness(monkeypatch, ["cswap", "panel", "--service-status"])
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 0 and seen["called"] == "status"
+
+    def test_add_offers_the_menu_bar_once_on_macos(self, monkeypatch):
+        seen = self._harness(monkeypatch, ["cswap", "add"])
+        cli.main()  # `add` returns normally
+        assert seen["added"] == (None, None)
+        assert seen["called"] == "offer"
+        assert seen["args"][0][0] == Path("/tmp/cswap-backup")
+
+    def test_add_does_not_offer_off_macos(self, monkeypatch):
+        seen = self._harness(monkeypatch, ["cswap", "add"], platform="linux")
+        cli.main()
+        assert seen["added"] == (None, None)
+        assert "called" not in seen
+
+    def test_a_broken_offer_never_fails_the_add(self, monkeypatch):
+        seen = self._harness(monkeypatch, ["cswap", "add"])
+
+        def boom(*a, **k):
+            raise RuntimeError("panel exploded")
+
+        monkeypatch.setattr("claude_swap.panel.offer", boom)
+        cli.main()
+        assert seen["added"] == (None, None)
