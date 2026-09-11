@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Callable
 
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.containers import VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Footer, ListView, Static
 
@@ -39,9 +40,10 @@ _BACK = ("← back", "back")
 
 
 # Rows one full account card takes (header + 5h + 7d + one per-model row),
-# the blank row between cards (AccountsPanel.render), and the panel's own
-# padding + bottom border (cswap.tcss #accounts-panel). The menu bar panel (panel/…/main.swift)
-# sizes its popover from the same numbers — keep them in sync.
+# the blank row between cards (AccountsPanel.render), and the scroll
+# container's own padding + bottom border (cswap.tcss #accounts-scroll).
+# The menu bar panel (panel/…/main.swift) sizes its popover from the same
+# numbers — keep them in sync.
 CARD_ROWS = 4
 CARD_GAP = 1
 PANEL_CHROME = 3
@@ -74,7 +76,11 @@ class DashboardScreen(Screen):
         self._menu_stack: list[tuple[str, MenuEntries]] = []
 
     def compose(self) -> ComposeResult:
-        yield AccountsPanel(id="accounts-panel")
+        # The panel sits inside a scroll container rather than scrolling
+        # itself: Textual routes the mouse wheel only to widgets with a
+        # layout or children, and AccountsPanel (a Static) has neither.
+        with VerticalScroll(id="accounts-scroll"):
+            yield AccountsPanel(id="accounts-panel")
         yield Static("", id="menu-title")
         yield ListView(id="menu")
         yield Footer()
@@ -85,18 +91,17 @@ class DashboardScreen(Screen):
         await self._push_menu("menu", self._root_entries())
 
     def _cap_accounts_panel(self) -> None:
-        """Bound the accounts panel to ``app.max_account_cards`` full cards.
+        """Bound the accounts area to ``app.max_account_cards`` full cards.
 
-        Past the cap the panel scrolls (mouse wheel) instead of growing and
-        pushing the menu off the bottom — what a fixed-height host like the
-        menu bar panel needs. Unset means the terminal owns the height.
+        Past the cap the ``#accounts-scroll`` container scrolls (mouse
+        wheel) instead of growing and pushing the menu off the bottom — what
+        a fixed-height host like the menu bar panel needs. Unset means the
+        terminal owns the height.
         """
         cap = getattr(self.app, "max_account_cards", None)
         if not cap:
             return
-        panel = self.query_one("#accounts-panel")
-        panel.styles.max_height = accounts_panel_max_height(cap)
-        panel.styles.overflow_y = "auto"
+        self.query_one("#accounts-scroll").styles.max_height = accounts_panel_max_height(cap)
 
     # -- menu plumbing --------------------------------------------------------
 
