@@ -66,6 +66,7 @@ _SUBCOMMAND_FLAGS = {
     "tui": "--tui",
     "watch": "--watch",
     "menubar": "--menubar",
+    "panel": "--panel",
 }
 
 
@@ -1069,6 +1070,66 @@ def _use_native_tls() -> None:
         pass
 
 
+def _panel_service(args, backup_root) -> int:
+    """Handle ``panel --install-service|--uninstall-service|--service-status``.
+
+    Same three shapes as :func:`_menubar_service`; the panel differs in that
+    ``--install-service`` may first have to compile the app, so it logs
+    progress through ``print`` where the menubar install is instant.
+    """
+    from claude_swap import panel
+
+    if args.install_service:
+        result = panel.install_service(backup_root, log=print)
+        print(f"Menu bar panel installed ({result['label']}).")
+        print('  Look for "CS" in your menu bar; click it for the dashboard.')
+        print(f"  plist: {result['plist']}")
+        print(f"  logs:  {result['stderr_log']}")
+        print(
+            dimmed(
+                "It starts at login from now on. Re-run this after a cswap "
+                "upgrade to rebuild the panel for the new version."
+            )
+        )
+        return 0
+
+    if args.uninstall_service:
+        result = panel.uninstall_service()
+        if result["was_loaded"] or result["removed_plist"]:
+            print("Menu bar panel removed.")
+        else:
+            print("Menu bar panel was not installed.")
+        return 0
+
+    result = panel.service_status()
+    if not result["installed"] and not result["loaded"]:
+        print("Menu bar panel is not installed.")
+        print(dimmed("Install it with: cswap panel --install-service"))
+        return 0
+    state = result["state"] or ("loaded" if result["loaded"] else "stopped")
+    pid = f" (pid {result['pid']})" if result["pid"] else ""
+    print(f"Menu bar panel: {state}{pid}")
+    print(f"  plist: {result['plist']}")
+    if not result["installed"]:
+        print(dimmed("  (loaded, but its plist is gone — re-run --install-service)"))
+    return 0
+
+
+def _offer_panel(backup_root) -> None:
+    """One-time, interactive-only "show it in the menu bar?" after ``add``.
+
+    Never lets a panel problem turn a successful ``add`` into a failure.
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        from claude_swap import panel
+
+        panel.offer(backup_root)
+    except Exception:  # noqa: BLE001 - best-effort nicety
+        pass
+
+
 def _menubar_service(args) -> int:
     """Handle ``menubar --install-service|--uninstall-service|--service-status``.
 
@@ -1223,6 +1284,8 @@ Commands:
   %(prog)s watch                      dashboard, opened on the live watch page
   %(prog)s menubar                    macOS menu bar app
   %(prog)s menubar --install-service  keep the menu bar running via launchd
+  %(prog)s panel                      macOS menu bar drop-down with the live dashboard
+  %(prog)s panel --install-service    keep the panel in the menu bar via launchd
   %(prog)s upgrade                    self-upgrade to latest
   %(prog)s purge                      remove all claude-swap data
 
@@ -1331,21 +1394,21 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
         "--install-service",
         action="store_true",
         help=(
-            "With 'menubar': install a launchd LaunchAgent so the menu bar "
+            "With 'menubar' or 'panel': install a launchd LaunchAgent so it "
             "starts at login and restarts on crash (macOS)"
         ),
     )
     parser.add_argument(
         "--uninstall-service",
         action="store_true",
-        help="With 'menubar': stop the LaunchAgent and remove its plist (macOS)",
+        help="With 'menubar' or 'panel': stop the LaunchAgent and remove its plist (macOS)",
     )
     parser.add_argument(
         "--service-status",
         action="store_true",
         help=(
-            "With 'menubar': report whether the LaunchAgent is installed "
-            "and running"
+            "With 'menubar' or 'panel': report whether the LaunchAgent is "
+            "installed and running"
         ),
     )
 
@@ -1428,6 +1491,11 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
         help=argparse.SUPPRESS,
     )
     group.add_argument(
+        "--panel",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    group.add_argument(
         "--upgrade",
         action="store_true",
         help=argparse.SUPPRESS,
@@ -1455,6 +1523,7 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
         or args.tui
         or args.watch
         or args.menubar
+        or args.panel
         or args.upgrade
         or args.remove_account is not None
         or args.disable_account is not None
@@ -1508,10 +1577,10 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
 
     if (
         args.install_service or args.uninstall_service or args.service_status
-    ) and not args.menubar:
+    ) and not (args.menubar or args.panel):
         parser.error(
             "--install-service, --uninstall-service and --service-status "
-            "can only be used with 'menubar'"
+            "can only be used with 'menubar' or 'panel'"
         )
 
     # Self-upgrade runs before switcher init so we don't touch config/keychain
@@ -1543,6 +1612,7 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
 
         if args.add_account:
             switcher.add_account(slot=args.slot, alias=args.alias)
+            _offer_panel(switcher.backup_dir)
         elif args.add_token is not None:
             switcher.add_account_from_token(
                 token=args.add_token,
@@ -1617,6 +1687,15 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
             from claude_swap.menubar import run as menubar_run
 
             sys.exit(menubar_run(switcher))
+        elif args.panel:
+            if sys.platform != "darwin":
+                error("The menu bar panel is only available on macOS.")
+                sys.exit(1)
+            if args.install_service or args.uninstall_service or args.service_status:
+                sys.exit(_panel_service(args, switcher.backup_dir))
+            from claude_swap import panel
+
+            sys.exit(panel.run_foreground(switcher.backup_dir, log=print))
     except ClaudeSwitchError as e:
         # In JSON mode keep stdout pure JSON: emit the structured error envelope
         # there (exit 1) instead of a red stderr line.

@@ -25,6 +25,18 @@ uv sync
 uv run cswap help
 ```
 
+### Show it in the menu bar (macOS, optional)
+
+The dashboard can live in your menu bar: a **CS** item that drops down the live TUI when you click it — like the system Displays or Wi-Fi panels. No Dock icon, no Terminal window.
+
+The first `cswap add` on a Mac asks *"Show the dashboard in the menu bar? [y/N]"* once. Say **y** and it is set up; say **n** (or come back later) and run:
+
+```bash
+cswap panel --install-service      # build it, put "CS" in the menu bar, start at login
+```
+
+It needs the Xcode Command Line Tools (`xcode-select --install`) — the panel is a tiny Swift app compiled on your machine the first time (about a minute; it fetches [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm)). See [Menu bar panel](#menu-bar-panel-macos) for what it does and how to manage it.
+
 ### Updating
 
 ```bash
@@ -33,6 +45,8 @@ cswap upgrade          # uv/pipx installs on macOS/Linux: auto-detects and upgra
 uv tool upgrade claude-swap
 pipx upgrade claude-swap
 ```
+
+After upgrading, a menu bar panel keeps the old build until you re-run `cswap panel --install-service`.
 
 ## Usage
 
@@ -219,6 +233,8 @@ cswap unclaimed                 # List stashed credential entries (slot + why th
 cswap unclaimed --purge ID      # Drop one (deletes its bytes; recover with /login + `cswap add`)
 cswap tui                       # Interactive dashboard (also: bare `cswap`)
 cswap watch                     # Dashboard, opened on the live watch page
+cswap panel                     # macOS: the dashboard as a menu bar drop-down (foreground)
+cswap panel --install-service   # macOS: keep "CS" in the menu bar, start at login
 cswap upgrade                   # Upgrade claude-swap to the latest version
 cswap purge                     # Remove all claude-swap data
 ```
@@ -252,6 +268,22 @@ The original flag spellings (`cswap --switch`, `cswap --list`, ...) keep working
 Session-mode profiles (`cswap run`) live under the backup directory in `sessions/`. Tool preferences (`settings.json`) and auto-switch state (`autoswitch_state.json` — cooldown and quarantined accounts; delete it to reset) live in the backup directory root.
 
 On Linux/WSL, set `XDG_DATA_HOME` to override the default location.
+
+## Menu bar panel (macOS)
+
+A **CS** status item whose click drops down the full interactive dashboard — the same TUI as `cswap`, in an embedded terminal, one click from anywhere. Arrow keys, `s` / `w` / `q`, the account menu, rules, themes: everything works as in a terminal. Click elsewhere to dismiss; the dashboard keeps running behind it and reopens instantly. Right-click **CS** to restart the dashboard or quit.
+
+```bash
+cswap panel --install-service      # build (first time), put "CS" in the menu bar, start at login
+cswap panel --service-status       # installed? loaded? pid?
+cswap panel --uninstall-service    # remove it from the menu bar and from login
+cswap panel                        # run it in the foreground instead (dies with the terminal)
+```
+
+- **Sizing.** The panel grows with your accounts up to three full cards; past that the accounts section scrolls (mouse wheel) so the menu never leaves the screen. It re-measures every time you open it, so accounts added later are picked up.
+- **Build.** The panel is a small Swift app (`src/claude_swap/panel/`) compiled on your machine into the backup root (`~/.claude-swap-backup/panel/`) — never into site-packages — and rebuilt only when its sources or the cswap version change. It needs the Xcode Command Line Tools: `xcode-select --install`. The first build fetches SwiftTerm from GitHub.
+- **launchd.** The agent is `~/Library/LaunchAgents/com.cswap.panel.plist`, logging to `~/Library/Logs/com.cswap.panel.{log,err}`. After `cswap upgrade`, re-run `--install-service` to rebuild for the new version.
+- **Menu bar vs. menu bar panel.** This panel shows the *dashboard*. The older [`cswap menubar`](#menu-bar-macos) below is a native drop-down *menu* (usage lines, click-to-switch) — lighter, no build step, but not the TUI. Run either or both.
 
 ## Menu bar (macOS)
 

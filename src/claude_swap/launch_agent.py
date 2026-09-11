@@ -123,18 +123,25 @@ def build_plist(
     program: list[str] | None = None,
     label: str = LABEL,
     home: Path | None = None,
+    *,
+    arguments: tuple[str, ...] = ("menubar",),
+    environment: dict[str, str] | None = None,
 ) -> bytes:
     """Serialize the LaunchAgent plist.
 
     Built with :mod:`plistlib` rather than a formatted XML string so paths
     containing ``&`` or ``<`` cannot produce a plist launchd refuses to parse.
+
+    ``arguments`` follow the program (the ``menubar`` subcommand by default);
+    ``environment`` is merged over the seeded PATH — the menu bar panel
+    (panel.py) uses both to launch its own binary with the paths it needs.
     """
     program = program or resolve_program()
     out_log, err_log = log_paths(label, home)
     return plistlib.dumps(
         {
             "Label": label,
-            "ProgramArguments": [*program, "menubar"],
+            "ProgramArguments": [*program, *arguments],
             "RunAtLoad": True,
             # Restart a crash, but respect a deliberate Quit. The menu bar's
             # quit handler calls rumps.quit_application(), a clean exit(0);
@@ -144,7 +151,7 @@ def build_plist(
             # A menu bar owner is a UI process; Background would have launchd
             # apply throttled I/O and CPU bands to it.
             "ProcessType": "Interactive",
-            "EnvironmentVariables": {"PATH": _path_env(program)},
+            "EnvironmentVariables": {"PATH": _path_env(program), **(environment or {})},
             "StandardOutPath": str(out_log),
             "StandardErrorPath": str(err_log),
         }
@@ -219,6 +226,9 @@ def install(
     home: Path | None = None,
     program: list[str] | None = None,
     uid: int | None = None,
+    *,
+    arguments: tuple[str, ...] = ("menubar",),
+    environment: dict[str, str] | None = None,
 ) -> dict:
     """Write the plist and hand the service to launchd.
 
@@ -233,7 +243,9 @@ def install(
 
     target_plist.parent.mkdir(parents=True, exist_ok=True)
     out_log.parent.mkdir(parents=True, exist_ok=True)
-    target_plist.write_bytes(build_plist(program, label, home))
+    target_plist.write_bytes(
+        build_plist(program, label, home, arguments=arguments, environment=environment)
+    )
 
     settled = True
     if is_loaded(label, uid):
@@ -253,7 +265,7 @@ def install(
     return {
         "label": label,
         "plist": str(target_plist),
-        "program": [*program, "menubar"],
+        "program": [*program, *arguments],
         "stdout_log": str(out_log),
         "stderr_log": str(err_log),
     }

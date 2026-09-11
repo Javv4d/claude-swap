@@ -38,6 +38,21 @@ MenuEntries = list[tuple[str, str]]  # (label, action_id)
 _BACK = ("← back", "back")
 
 
+# Rows one full account card takes (header + 5h + 7d + one per-model row),
+# the blank row between cards (AccountsPanel.render), and the panel's own
+# padding + bottom border (cswap.tcss #accounts-panel). The menu bar panel (panel/…/main.swift)
+# sizes its popover from the same numbers — keep them in sync.
+CARD_ROWS = 4
+CARD_GAP = 1
+PANEL_CHROME = 3
+
+
+def accounts_panel_max_height(cards: int) -> int:
+    """Height (rows) that fits ``cards`` full cards in the accounts panel."""
+    cards = max(1, cards)
+    return PANEL_CHROME + cards * CARD_ROWS + (cards - 1) * CARD_GAP
+
+
 class DashboardScreen(Screen):
     BINDINGS = [
         Binding("s", "open_switch", "Switch accounts"),
@@ -65,8 +80,23 @@ class DashboardScreen(Screen):
         yield Footer()
 
     async def on_mount(self) -> None:
+        self._cap_accounts_panel()
         self.query_one("#menu", ListView).focus()
         await self._push_menu("menu", self._root_entries())
+
+    def _cap_accounts_panel(self) -> None:
+        """Bound the accounts panel to ``app.max_account_cards`` full cards.
+
+        Past the cap the panel scrolls (mouse wheel) instead of growing and
+        pushing the menu off the bottom — what a fixed-height host like the
+        menu bar panel needs. Unset means the terminal owns the height.
+        """
+        cap = getattr(self.app, "max_account_cards", None)
+        if not cap:
+            return
+        panel = self.query_one("#accounts-panel")
+        panel.styles.max_height = accounts_panel_max_height(cap)
+        panel.styles.overflow_y = "auto"
 
     # -- menu plumbing --------------------------------------------------------
 
