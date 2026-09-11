@@ -23,6 +23,13 @@ from claude_swap.exceptions import (
 )
 from claude_swap.fsutil import replace_with_retry
 from claude_swap.models import Platform, get_timestamp, normalize_alias
+from claude_swap.rules import (
+    AccountRule,
+    parse_hard_limit,
+    parse_priority,
+    parse_swap_limit,
+    rule_from_record,
+)
 from claude_swap.oauth import credential_fingerprint
 
 if TYPE_CHECKING:
@@ -94,6 +101,42 @@ def _validate_imported_account(switcher: ClaudeAccountSwitcher, account: dict) -
             raise TransferError(f"invalid alias for {email}: {e}") from e
 
     return email, str(raw_number)
+
+
+_RULE_PARSERS = {
+    "swapLimit": ("swap_limit", parse_swap_limit),
+    "hardLimit": ("hard_limit", parse_hard_limit),
+    "priority": ("priority", parse_priority),
+}
+
+
+def _parse_imported_rule(account: dict, email: str) -> AccountRule | None:
+    """The account's switching rule from its ``rule`` object (rules.py).
+
+    ``None`` when the export carries no ``rule`` key at all — a file from a
+    build that predates rules — so import can leave an existing slot's rule
+    alone instead of silently resetting it. An empty object is a real answer
+    (the default rule). Anything malformed is a TransferError, raised in
+    pass-1 before any write, like every other field.
+    """
+    if "rule" not in account:
+        return None
+    raw = account["rule"]
+    if not isinstance(raw, dict):
+        raise TransferError(f"rule for {email} must be a JSON object")
+    unknown = set(raw) - set(_RULE_PARSERS)
+    if unknown:
+        raise TransferError(
+            f"unknown rule field for {email}: {', '.join(sorted(unknown))}"
+        )
+    fields: dict = {}
+    for key, (attr, parse) in _RULE_PARSERS.items():
+        if key in raw and raw[key] is not None:
+            try:
+                fields[attr] = parse(raw[key])
+            except (TypeError, ValueError) as e:
+                raise TransferError(f"invalid rule for {email}: {e}") from e
+    return AccountRule(**fields)
 
 
 def _atomic_write_file(path: Path, content: str) -> None:
@@ -273,6 +316,8 @@ def export_accounts(
             entry["kind"] = "api_key"
         if record.get("alias"):
             entry["alias"] = record["alias"]
+        # Always present, defaults as {} — see _parse_imported_rule.
+        entry["rule"] = rule_from_record(record).to_record_fields()
         accounts_payload.append(entry)
 
     if not accounts_payload:
@@ -431,6 +476,7 @@ def import_accounts(
                 "added": raw.get("added") or get_timestamp(),
                 "kind": "api_key" if is_api_key else "oauth",
                 "alias": alias,
+                "rule": _parse_imported_rule(raw, email),
                 "creds_text": creds_text,
                 "config_text": json.dumps(config_obj, indent=2),
             }
@@ -564,6 +610,12 @@ def import_accounts(
             new_record["kind"] = "api_key"
         if entry.get("alias"):
             new_record["alias"] = entry["alias"]
+        rule = entry["rule"]
+        if rule is None:
+            # No `rule` in the export (pre-rules build): an overwrite keeps
+            # the slot's current rule rather than resetting it to defaults.
+            rule = rule_from_record(data["accounts"].get(target_num))
+        new_record.update(rule.to_record_fields())
         data["accounts"][target_num] = new_record
         if int(target_num) not in data["sequence"]:
             data["sequence"].append(int(target_num))
