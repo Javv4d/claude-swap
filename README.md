@@ -346,7 +346,7 @@ cswap import backup.cswap                    # Skips accounts that already exist
 cswap import backup.cswap --force            # Overwrite existing
 ```
 
-Each account travels with its alias and its [rule](#account-rules--limits-and-priorities) (priority, swap limit, hard limit), so a second machine gets the same switching behaviour; `--force` applies the exported rule over the destination's, and an export from an older cswap (no rule data) leaves existing rules alone.
+Each account travels with its alias and its [rule](#account-rules--limits-and-priorities) (priority, swap limit, hard limit), so a second machine gets the same switching behaviour for accounts it did not have yet. An account the destination already manages keeps the rule set there — even with `--force`, which replaces credentials, not preferences.
 
 The export file is plaintext JSON and, by default, carries only each account's own login — machine-shared MCP/plugin OAuth tokens and the device token stay on the source machine (`--full` keeps everything, for same-PC backups). If you need encryption, pipe through your tool of choice (e.g. `cswap export - | gpg -c > backup.gpg`).
 
