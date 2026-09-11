@@ -64,7 +64,6 @@ _SUBCOMMAND_FLAGS = {
     "upgrade": "--upgrade",
     "update": "--upgrade",
     "tui": "--tui",
-    "watch": "--watch",
     "menubar": "--menubar",
     "panel": "--panel",
 }
@@ -1281,7 +1280,6 @@ Commands:
   %(prog)s export <path>              export accounts
   %(prog)s import <path>              import accounts
   %(prog)s tui                        interactive dashboard (also: bare %(prog)s)
-  %(prog)s watch                      dashboard, opened on the live watch page
   %(prog)s menubar                    macOS menu bar app
   %(prog)s menubar --install-service  keep the menu bar running via launchd
   %(prog)s panel                      macOS menu bar drop-down with the live dashboard
@@ -1481,11 +1479,6 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
         help=argparse.SUPPRESS,
     )
     group.add_argument(
-        "--watch",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    group.add_argument(
         "--menubar",
         action="store_true",
         help=argparse.SUPPRESS,
@@ -1521,7 +1514,6 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
         or args.status
         or args.purge
         or args.tui
-        or args.watch
         or args.menubar
         or args.panel
         or args.upgrade
@@ -1672,10 +1664,6 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
             from claude_swap.tui import run as tui_run
 
             sys.exit(tui_run(switcher))
-        elif args.watch:
-            from claude_swap.tui import run as tui_run
-
-            sys.exit(tui_run(switcher, start="watch"))
         elif args.menubar:
             if sys.platform != "darwin":
                 error("The menu bar is only available on macOS.")

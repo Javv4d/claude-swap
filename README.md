@@ -195,11 +195,9 @@ Subfolders inherit the nearest mapped ancestor. In an unmapped directory, `cswap
 
 ### Interactive dashboard (TUI)
 
-Run `cswap` on its own (or `cswap tui`) for the full-screen dashboard: live usage for every account, switching, and the auto-switcher, all keyboard-driven. `cswap watch` opens it straight to the live monitor. Works on macOS, Linux, and Windows.
+Run `cswap` on its own (or `cswap tui`) for the full-screen dashboard: live usage for every account, switching, and the auto-switcher, all keyboard-driven. Works on macOS, Linux, and Windows.
 
 The dashboard shows every account as a full card — bars, reset times, and per-model rows — with the active one marked (`cswap config set ui.inactiveCards mini` collapses the others to one line). In the auto-switch view, `t` sets the threshold, `m` cycles the per-model limit (off → Fable → all), and `l` goes live; all three are saved, so the view reopens the way you left it. The engine in that view runs only while the view is open — for always-on switching use `cswap auto` or the menu bar.
-
-<img src="assets/tui-watch.png" width="760" alt="cswap watch — live 5h/7d usage bars for every account, with reset times and the active account marked">
 
 ### Refresh expired tokens
 
@@ -232,7 +230,6 @@ cswap move 2 1                  # Assign an account to a slot (relocates to an e
 cswap unclaimed                 # List stashed credential entries (slot + why they were stashed)
 cswap unclaimed --purge ID      # Drop one (deletes its bytes; recover with /login + `cswap add`)
 cswap tui                       # Interactive dashboard (also: bare `cswap`)
-cswap watch                     # Dashboard, opened on the live watch page
 cswap panel                     # macOS: the dashboard as a menu bar drop-down (foreground)
 cswap panel --install-service   # macOS: keep "CS" in the menu bar, start at login
 cswap upgrade                   # Upgrade claude-swap to the latest version

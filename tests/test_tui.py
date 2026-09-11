@@ -830,7 +830,6 @@ class TestDashboard:
             ids = [item.action_id for item in menu.query(MenuItem)]
             assert ids == [
                 "switch",
-                "watch",
                 "auto",
                 "add-menu",
                 "disable-menu",
@@ -839,8 +838,8 @@ class TestDashboard:
                 "theme-menu",
                 "quit",
             ]
-            # nest into Add (index 3), then back out with escape
-            await pilot.press("down", "down", "down", "enter")
+            # nest into Add (index 2), then back out with escape
+            await pilot.press("down", "down", "enter")
             await pilot.pause()
             ids = [item.action_id for item in menu.query(MenuItem)]
             assert ids == ["add-login", "add-token", "back"]
@@ -1126,96 +1125,13 @@ class TestDashboard:
 
 
 @pytest.mark.asyncio
-class TestWatchScreen:
+class TestSnapshotLanes:
+    """The normal / store-only refresh lanes, driven through the dashboard."""
+
     def _fake(self, tmp_path):
         return FakeSwitcher(
             [make_account(1, active=True), make_account(2)], tmp_path
         )
-
-    async def test_w_opens_monitor_without_cursor(self, tmp_path):
-        app = make_app(self._fake(tmp_path))
-        async with app.run_test(size=(100, 40)) as pilot:
-            await settle(pilot)
-            await pilot.press("w")
-            await pilot.pause()
-            from textual.widgets import ListView
-
-            from claude_swap.tui.dashboard import WatchScreen
-            from claude_swap.tui.widgets import AccountItem
-
-            assert isinstance(app.screen, WatchScreen)
-            listview = app.screen.query_one("#accounts", ListView)
-            assert len(list(listview.query(AccountItem))) == 2  # full cards
-            assert listview.index is None  # monitor mode: no cursor
-            await pilot.press("enter")  # inert while just watching
-            await settle(pilot)
-            assert not any(call[0] == "switch_to" for call in fake_calls(app))
-
-    async def test_s_arms_selection_switch_stays_watching(self, tmp_path):
-        fake = self._fake(tmp_path)
-        app = make_app(fake)
-        async with app.run_test(size=(100, 40)) as pilot:
-            await settle(pilot)
-            await pilot.press("w")
-            await pilot.pause()
-            await pilot.press("s")
-            await pilot.pause()
-            from textual.widgets import ListView
-
-            from claude_swap.tui.dashboard import WatchScreen
-
-            listview = app.screen.query_one("#accounts", ListView)
-            assert listview.index == 0  # cursor armed, on the active account
-            await pilot.press("down", "enter")
-            await settle(pilot)
-            assert ("switch_to", "2") in fake.calls
-            assert isinstance(app.screen, WatchScreen)  # stayed watching
-            assert app.screen.query_one("#accounts", ListView).index is None
-            assert app.snapshot.active_number == "2"
-
-    async def test_escape_disarms_then_leaves(self, tmp_path):
-        fake = self._fake(tmp_path)
-        app = make_app(fake)
-        async with app.run_test(size=(100, 40)) as pilot:
-            await settle(pilot)
-            await pilot.press("w")
-            await pilot.pause()
-            await pilot.press("s")
-            await pilot.pause()
-            await pilot.press("escape")  # disarm selection only
-            await pilot.pause()
-            from textual.widgets import ListView
-
-            from claude_swap.tui.dashboard import DashboardScreen, WatchScreen
-
-            assert isinstance(app.screen, WatchScreen)
-            assert app.screen.query_one("#accounts", ListView).index is None
-            await pilot.press("escape")  # now leave
-            await pilot.pause()
-            assert isinstance(app.screen, DashboardScreen)
-            assert not any(call[0] == "switch_to" for call in fake.calls)
-
-    async def test_menu_watch_entry_opens_it(self, tmp_path):
-        app = make_app(self._fake(tmp_path))
-        async with app.run_test(size=(100, 40)) as pilot:
-            await settle(pilot)
-            await menu_select(pilot, "watch")
-            from claude_swap.tui.dashboard import WatchScreen
-
-            assert isinstance(app.screen, WatchScreen)
-
-    async def test_app_start_watch_stacks_over_dashboard(self, tmp_path):
-        from claude_swap.tui.app import CswapApp
-
-        app = CswapApp(self._fake(tmp_path), start="watch")
-        async with app.run_test(size=(100, 40)) as pilot:
-            await settle(pilot)
-            from claude_swap.tui.dashboard import DashboardScreen, WatchScreen
-
-            assert isinstance(app.screen, WatchScreen)
-            await pilot.press("escape")
-            await pilot.pause()
-            assert isinstance(app.screen, DashboardScreen)
 
     async def test_blocked_normal_allows_store_only_repaint_without_stale_overpaint(
         self, tmp_path
@@ -1284,29 +1200,6 @@ class TestWatchScreen:
             app.set_store_only(True)
             await settle(pilot)
             assert fake.fetch_sets == [set()]
-
-    async def test_watch_title_shows_snapshot_age_and_long_refresh(self, tmp_path):
-        app = make_app(self._fake(tmp_path))
-        async with app.run_test(size=(100, 40)) as pilot:
-            await settle(pilot)
-            await pilot.press("w")
-            await pilot.pause()
-            from textual.widgets import Static
-
-            title = app.screen.query_one("#list-title", Static)
-            # Fresh snapshots stay quiet; the age note is a staleness alarm.
-            assert "snapshot" not in title.render().plain
-            app.snapshot = dataclasses.replace(
-                app.snapshot, taken_at=time.time() - app.SNAPSHOT_AGE_NOTE_S - 1.0
-            )
-            app._update_refresh_status()
-            await pilot.pause()
-            assert "snapshot 1m ago" in title.render().plain
-            app._normal_refreshing = True
-            app._normal_started_at = time.time() - app.POLL_INTERVAL_S - 1.0
-            app._update_refresh_status()
-            await pilot.pause()
-            assert "refreshing" in title.render().plain
 
 
 def fake_calls(app) -> list[tuple]:
@@ -1732,23 +1625,6 @@ class TestBareInvocation:
         with pytest.raises(SystemExit) as excinfo:
             cli.main()
         assert excinfo.value.code == 2  # argparse usage error
-
-    def test_cswap_watch_opens_tui_on_watch_page(self, monkeypatch, temp_home):
-        import claude_swap.cli as cli
-        import claude_swap.tui as tui
-
-        launched = {}
-
-        def fake_run(switcher, start="dashboard"):
-            launched["start"] = start
-            return 0
-
-        monkeypatch.setattr(sys, "argv", ["cswap", "watch"])
-        monkeypatch.setattr(tui, "run", fake_run)
-        with pytest.raises(SystemExit) as excinfo:
-            cli.main()
-        assert excinfo.value.code == 0
-        assert launched["start"] == "watch"
 
 
 # ---------------------------------------------------------------------------
