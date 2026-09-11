@@ -310,7 +310,9 @@ class TestRuleTransfer:
                 assert not {"swapLimit", "hardLimit", "priority"} & set(b)
                 assert dst.account_rule("1").summary() == "p2 · swap 95% · hard 50%"
 
-    def test_force_overwrite_applies_the_exported_rule(self, temp_home: Path):
+    def test_force_overwrite_keeps_the_destination_rule(self, temp_home: Path):
+        """--force replaces credentials, not preferences: an account the
+        destination already manages keeps the rule set on that machine."""
         src = _linux_switcher(temp_home)
         _seed_account(src, 1, "alice@example.com", org_uuid="org-a")
         self._set_rule(src, 1, hardLimit=40.0, priority=3)
@@ -323,10 +325,49 @@ class TestRuleTransfer:
             with patch.dict(os.environ, {"HOME": str(dst_home)}):
                 dst = _linux_switcher(dst_home)
                 _seed_account(dst, 1, "alice@example.com", org_uuid="org-a")
-                self._set_rule(dst, 1, swapLimit=80.0, priority=1)
+                self._set_rule(dst, 1, swapLimit=80.0, priority=2)
                 import_accounts(dst, str(out_file), force=True)
                 rec = dst._get_sequence_data()["accounts"]["1"]
-                assert (rec.get("swapLimit"), rec["hardLimit"], rec["priority"]) == (None, 40.0, 3)
+                assert (rec["swapLimit"], rec.get("hardLimit"), rec["priority"]) == (80.0, None, 2)
+                # the credentials did move
+                assert "_marker" in dst._read_account_credentials("1", "alice@example.com")
+
+    def test_force_overwrite_keeps_a_default_destination_rule(self, temp_home: Path):
+        """Even a never-edited (default) local rule beats the exported one."""
+        src = _linux_switcher(temp_home)
+        _seed_account(src, 1, "alice@example.com", org_uuid="org-a")
+        self._set_rule(src, 1, hardLimit=40.0, priority=3)
+        out_file = temp_home / "backup.cswap"
+        export_accounts(src, str(out_file))
+
+        dst_home = temp_home.parent / "dst"
+        dst_home.mkdir()
+        with patch("pathlib.Path.home", return_value=dst_home):
+            with patch.dict(os.environ, {"HOME": str(dst_home)}):
+                dst = _linux_switcher(dst_home)
+                _seed_account(dst, 1, "alice@example.com", org_uuid="org-a")
+                import_accounts(dst, str(out_file), force=True)
+                rec = dst._get_sequence_data()["accounts"]["1"]
+                assert not {"swapLimit", "hardLimit", "priority"} & set(rec)
+
+    def test_new_slot_from_a_rule_less_export_gets_defaults(self, temp_home: Path):
+        src = _linux_switcher(temp_home)
+        _seed_account(src, 1, "alice@example.com")
+        out_file = temp_home / "backup.cswap"
+        export_accounts(src, str(out_file))
+        envelope = json.loads(out_file.read_text())
+        for acc in envelope["accounts"]:
+            acc.pop("rule", None)
+        out_file.write_text(json.dumps(envelope))
+
+        dst_home = temp_home.parent / "dst"
+        dst_home.mkdir()
+        with patch("pathlib.Path.home", return_value=dst_home):
+            with patch.dict(os.environ, {"HOME": str(dst_home)}):
+                dst = _linux_switcher(dst_home)
+                import_accounts(dst, str(out_file))
+                rec = dst._get_sequence_data()["accounts"]["1"]
+                assert not {"swapLimit", "hardLimit", "priority"} & set(rec)
 
     def test_export_without_rule_key_keeps_the_local_rule_on_overwrite(self, temp_home: Path):
         """An export from a build that predates rules must not wipe a rule

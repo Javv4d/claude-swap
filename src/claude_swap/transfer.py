@@ -114,10 +114,11 @@ def _parse_imported_rule(account: dict, email: str) -> AccountRule | None:
     """The account's switching rule from its ``rule`` object (rules.py).
 
     ``None`` when the export carries no ``rule`` key at all — a file from a
-    build that predates rules — so import can leave an existing slot's rule
-    alone instead of silently resetting it. An empty object is a real answer
-    (the default rule). Anything malformed is a TransferError, raised in
-    pass-1 before any write, like every other field.
+    build that predates rules. An empty object is a real answer (the default
+    rule). Anything malformed is a TransferError, raised in pass-1 before
+    any write, like every other field. Only a *new* slot takes the exported
+    rule; an account the destination already manages keeps its own (see
+    import_accounts).
     """
     if "rule" not in account:
         return None
@@ -610,11 +611,16 @@ def import_accounts(
             new_record["kind"] = "api_key"
         if entry.get("alias"):
             new_record["alias"] = entry["alias"]
-        rule = entry["rule"]
-        if rule is None:
-            # No `rule` in the export (pre-rules build): an overwrite keeps
-            # the slot's current rule rather than resetting it to defaults.
+        if existing_slot is not None:
+            # The destination already manages this account: its own rule
+            # (priority / limits, set for *this* machine's mix of accounts)
+            # wins over whatever the export carries — even under --force,
+            # which is about credentials, not preferences.
             rule = rule_from_record(data["accounts"].get(target_num))
+        else:
+            # A new slot takes the exported rule; a pre-rules export (no
+            # `rule` key) means the defaults.
+            rule = entry["rule"] or AccountRule()
         new_record.update(rule.to_record_fields())
         data["accounts"][target_num] = new_record
         if int(target_num) not in data["sequence"]:
