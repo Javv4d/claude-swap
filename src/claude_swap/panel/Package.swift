@@ -9,7 +9,8 @@ let package = Package(
     name: "CswapPanel",
     platforms: [.macOS(.v13)],
     dependencies: [
-        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", from: "1.2.0"),
+        // Pinned: the panel is tuned against this release (see main.swift, customBlockGlyphs).
+        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", exact: "1.20.0"),
     ],
     targets: [
         .executableTarget(

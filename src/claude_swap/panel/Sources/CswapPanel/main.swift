@@ -61,6 +61,11 @@ final class TermVC: NSViewController, LocalProcessTerminalViewDelegate {
         term.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)  // SF Mono, like Terminal.app
         term.nativeBackgroundColor = NSColor(calibratedWhite: 0.09, alpha: 1)
         term.nativeForegroundColor = NSColor(calibratedWhite: 0.9, alpha: 1)
+        // SwiftTerm's custom vector renderer for box-drawing characters
+        // (U+2500–257F — the usage bars' ━ ─ ┃ ╸) misplaces the text that
+        // follows a bar: the "88%" landed on top of the threshold tick. SF Mono
+        // has these glyphs at exactly one cell each, so let the font draw them.
+        term.customBlockGlyphs = false
         term.caretColor = .clear   // the TUI has no text cursor; hide the blinking block
         term.caretTextColor = NSColor(calibratedWhite: 0.9, alpha: 1)
         view = term

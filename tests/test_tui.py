@@ -1704,6 +1704,39 @@ class TestAccountRulesUI:
     """rules.py in the TUI: chips and ticks on the cards, the editor modal,
     and the auto view's priority-aware candidate list."""
 
+    def test_card_header_meta_moves_to_its_own_line_when_it_does_not_fit(self):
+        """Chips + over-limit marker + age are one group: on the header line
+        when the whole thing fits, else on the next line, right-aligned —
+        never wrapped mid-phrase by the terminal ("⛔ over" / "hard limit")."""
+        from claude_swap.rules import AccountRule
+        from claude_swap.tui.widgets import account_card_text
+
+        acc = dataclasses.replace(
+            make_account(
+                3, email="jawad.alsahlani@teli.ai",
+                entry=make_entry(60.0, 82.0, scoped=[("Fable", 99.0)], age_s=300),
+            ),
+            rule=AccountRule(hard_limit=50.0, priority=3),
+            org_name="jawad.alsahlani@teli.ai's Organization",
+        )
+        meta = "p3 · hard 50%   ⛔ over hard limit   · 5m ago"
+
+        wide = account_card_text(acc, 140, threshold=99.0, now=time.time()).plain.split("\n")
+        assert wide[0].endswith(meta) and "5h" in wide[1]
+
+        lines = account_card_text(acc, 100, threshold=99.0, now=time.time()).plain.split("\n")
+        assert lines[0] == " 3  jawad.alsahlani@teli.ai  [jawad.alsahlani@teli.ai's Organization]"
+        assert lines[1].endswith(meta) and len(lines[1]) == 100 - 1  # right-aligned to the width
+        assert lines[1].startswith("    ") and lines[2].lstrip().startswith("5h")
+        assert all(len(line) <= 100 for line in lines)
+
+    def test_card_header_without_meta_is_one_line(self):
+        from claude_swap.tui.widgets import account_card_text
+
+        acc = make_account(1, active=True, entry=make_entry(10.0, 20.0))
+        lines = account_card_text(acc, 60, threshold=99.0, now=time.time()).plain.split("\n")
+        assert lines[0].endswith("● active") and lines[1].lstrip().startswith("5h")
+
     async def test_card_shows_rule_chips_hard_tick_and_over_limit_marker(self, tmp_path):
         from claude_swap.rules import AccountRule
 

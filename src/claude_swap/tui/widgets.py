@@ -219,14 +219,32 @@ def account_card_text(
         text.append("   ● active", style=f"bold {palette.accent}")
     if acc.disabled:
         text.append("   (disabled)", style=palette.muted)
+
+    # The rule chips, the over-limit marker and the age note are one group.
+    # It sits at the end of the header line when the whole line fits; when
+    # it does not, the group moves to its own line, right-aligned, instead
+    # of the terminal wrapping it mid-phrase ("⛔ over" / "hard limit").
+    meta = Text()
     chips = rule_chips(acc.rule, threshold)
     if chips:
-        text.append(f"   {chips}", style=palette.muted)
+        meta.append(chips, style=palette.muted)
     if _over_hard_limit(acc):
-        text.append("   ⛔ over hard limit", style=f"bold {palette.sev_crit}")
+        if meta:
+            meta.append("   ")
+        meta.append("⛔ over hard limit", style=f"bold {palette.sev_crit}")
     age = data.format_age(acc.usage.age_s)
     if age:
-        text.append(f"   {age}", style=palette.muted)
+        if meta:
+            meta.append("   ")
+        meta.append(age, style=palette.muted)
+    if meta:
+        if text.cell_len + 3 + meta.cell_len <= width:
+            text.append("   ")
+            text.append_text(meta)
+        else:
+            text.append("\n")
+            text.append(" " * max(4, width - meta.cell_len))
+            text.append_text(meta)
 
     sentinel = acc.usage.sentinel
     if sentinel is not None:
