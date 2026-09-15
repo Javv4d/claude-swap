@@ -1283,6 +1283,61 @@ class TestDeadTokenQuarantine:
         # A dead token is never nominated as the alternate to poll.
         assert due_candidate(["1"], entries, clock.now) is None
 
+    def test_strike_buffer_keeps_the_token_in_use_until_the_count_is_reached(self, store):
+        from claude_swap.usage_store import set_dead_token_strikes
+
+        set_dead_token_strikes(3)
+        store.record({"1": FetchRecord(error="invalid_grant")}, IDENT)
+        # One (and two) invalid_grant answers no longer condemn the slot: the
+        # stored token stays in use and eligible to retry.
+        assert not store.entries(IDENT)["1"].token_dead()
+        store.record({"1": FetchRecord(error="invalid_grant")}, IDENT)
+        assert not store.entries(IDENT)["1"].token_dead()
+        store.record({"1": FetchRecord(error="invalid_grant")}, IDENT)
+        # Third strike reaches the configured buffer: now it is dead.
+        assert store.entries(IDENT)["1"].token_dead()
+
+    def test_strike_buffer_keeps_a_struck_slot_pollable(self, store, clock):
+        from claude_swap.usage_store import set_dead_token_strikes
+
+        set_dead_token_strikes(2)
+        store.record({"1": FetchRecord(error="invalid_grant")}, IDENT)
+        clock.advance(10_000)  # past the failure backoff
+        entries = store.entries(IDENT)
+        # Below the buffer: still a valid alternate to poll (it gets retried).
+        assert not entries["1"].token_dead()
+        assert due_candidate(["1"], entries, clock.now) == "1"
+
+    def test_a_success_inside_the_buffer_clears_the_strikes(self, store):
+        from claude_swap.usage_store import set_dead_token_strikes
+
+        set_dead_token_strikes(3)
+        store.record({"1": FetchRecord(error="invalid_grant")}, IDENT)
+        store.record({"1": FetchRecord(error="invalid_grant")}, IDENT)
+        store.record({"1": FetchRecord(usage=USAGE)}, IDENT)  # recovered
+        assert store.entries(IDENT)["1"].auth_dead_strikes == 0
+        assert not store.entries(IDENT)["1"].token_dead()
+
+    def test_explicit_threshold_still_overrides_the_configured_value(self, store):
+        from claude_swap.usage_store import set_dead_token_strikes
+
+        set_dead_token_strikes(5)
+        store.record({"1": FetchRecord(error="invalid_grant")}, IDENT)
+        entry = store.entries(IDENT)["1"]
+        assert not entry.token_dead()  # 1 < configured 5
+        assert entry.token_dead(threshold=1)  # explicit arg wins
+
+    def test_set_dead_token_strikes_never_drops_below_one(self):
+        from claude_swap.usage_store import (
+            AUTH_DEAD_STRIKES,
+            effective_dead_token_strikes,
+            set_dead_token_strikes,
+        )
+
+        for bad in (0, -3, "x", None):
+            set_dead_token_strikes(bad)
+            assert effective_dead_token_strikes() == AUTH_DEAD_STRIKES
+
     def test_clear_dead_token_lifts_quarantine(self, store):
         store.record({"1": FetchRecord(error="invalid_grant")}, IDENT)
         store.record({"1": FetchRecord(error="invalid_grant")}, IDENT)

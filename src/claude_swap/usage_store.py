@@ -226,6 +226,31 @@ RETRY_AFTER_FLOOR_CAP_S = 4500.0
 # (the failure backoff between the two strikes).
 AUTH_DEAD_STRIKES = 1
 
+# The strike count actually in force, overridable from settings
+# (autoswitch.deadTokenStrikes) via ``set_dead_token_strikes``. Kept as a
+# module-level value because the readers that gate fetch eligibility and the
+# dead verdict — ``token_dead`` (a method), ``due_candidate`` and
+# ``_row_eligible`` (module functions called under the store lock) — have no
+# settings handle of their own. Every production path that reads a verdict
+# first goes through a switcher, which applies the configured value (in
+# __init__ and on each settings reload) before reading; tests reset it via an
+# autouse fixture. Never below the AUTH_DEAD_STRIKES floor of 1.
+_effective_dead_strikes: int = AUTH_DEAD_STRIKES
+
+
+def set_dead_token_strikes(n: int) -> None:
+    """Set the in-force dead-token strike count (>= 1). See the module note."""
+    global _effective_dead_strikes
+    try:
+        _effective_dead_strikes = max(AUTH_DEAD_STRIKES, int(n))
+    except (TypeError, ValueError):
+        _effective_dead_strikes = AUTH_DEAD_STRIKES
+
+
+def effective_dead_token_strikes() -> int:
+    """The dead-token strike count currently in force."""
+    return _effective_dead_strikes
+
 # Fetch errors that prove the stored credential is permanently unusable (vs.
 # transient 429/timeout/network). Only these advance the dead-token strike
 # count; everything else leaves it untouched (a transient error is no evidence
@@ -355,7 +380,7 @@ class UsageEntry:
 
     def token_dead(
         self,
-        threshold: int = AUTH_DEAD_STRIKES,
+        threshold: int | None = None,
         stored_fp: str | None = None,
     ) -> bool:
         """Whether the stored credential's refresh-token lineage is provably dead.
@@ -370,7 +395,12 @@ class UsageEntry:
         since the verdict — the strike no longer applies (any writing path
         heals it, mirroring #142's identity-not-slot rule). A row struck
         before fingerprints were recorded binds unconditionally.
+
+        ``threshold`` defaults to the configured in-force count
+        (``effective_dead_token_strikes``); pass an explicit int to override.
         """
+        if threshold is None:
+            threshold = effective_dead_token_strikes()
         if self.auth_dead_strikes < threshold:
             return False
         if (
@@ -1200,7 +1230,7 @@ def _row_eligible(
 ) -> bool:
     """Fetch eligibility of a stored row, evaluated under the write lock
     (see :meth:`UsageStore.reserve` for the two caller modes)."""
-    if int(row.get("authDeadStrikes") or 0) >= AUTH_DEAD_STRIKES:
+    if int(row.get("authDeadStrikes") or 0) >= effective_dead_token_strikes():
         return False
     backoff_until = _num_or_none(row.get("backoffUntil"))
     if backoff_until is not None and now < backoff_until:

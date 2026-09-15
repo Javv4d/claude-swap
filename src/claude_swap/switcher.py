@@ -98,6 +98,7 @@ from claude_swap.usage_store import (
     FetchRecord,
     UsageEntry,
     UsageStore,
+    set_dead_token_strikes,
     with_sentinel,
 )
 
@@ -319,6 +320,15 @@ class ClaudeAccountSwitcher:
         self.home = Path.home()
         self.platform = Platform.detect()
         self.backup_dir = get_backup_root()
+        # Put the configured dead-token strike buffer in force before any
+        # verdict is read (import auto-heal, list/status, the engine). Best
+        # effort: a missing/garbage settings file leaves the floor of 1.
+        try:
+            set_dead_token_strikes(
+                load_settings(self.backup_dir).dead_token_strikes
+            )
+        except Exception:
+            pass
 
         # Migrate legacy ~/.claude-swap-backup to the new XDG path on Linux/WSL
         # before any logger or directory setup writes to the new location.
@@ -1827,6 +1837,7 @@ class ClaudeAccountSwitcher:
         if self._poll_inputs_cache is not None and self._poll_inputs_cache[0] == mtime:
             return self._poll_inputs_cache[1]
         loaded = load_settings(self.backup_dir)
+        set_dead_token_strikes(loaded.dead_token_strikes)
         inputs = (loaded.threshold, parse_model_names(loaded.model))
         self._poll_inputs_cache = (mtime, inputs)
         return inputs

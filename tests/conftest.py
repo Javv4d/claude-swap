@@ -717,6 +717,18 @@ def sample_sequence_data_with_org():
 
 
 @pytest.fixture(autouse=True)
+def _reset_dead_token_strikes():
+    """The dead-token strike count is a module-level value in usage_store
+    (see its note). Reset it to the floor around every test so one test's
+    configured buffer never leaks into another under the same xdist worker."""
+    from claude_swap import usage_store
+
+    usage_store.set_dead_token_strikes(usage_store.AUTH_DEAD_STRIKES)
+    yield
+    usage_store.set_dead_token_strikes(usage_store.AUTH_DEAD_STRIKES)
+
+
+@pytest.fixture(autouse=True)
 def _deterministic_poll_jitter(monkeypatch):
     """Zero the poll-plan jitter so cadence tests are clock-exact; the jitter
     itself is exercised in test_poll_policy via an injected rng."""

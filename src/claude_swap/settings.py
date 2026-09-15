@@ -57,6 +57,14 @@ class AutoSwitchSettings:
     # 5h/7d windows still have headroom. None = account-wide 5h/7d only
     # (default).
     model: str | None = None
+    # Consecutive server-confirmed invalid_grant answers before a slot's
+    # refresh-token lineage is treated as dead (quarantined, "re-login
+    # needed"). 1 = quarantine on the first (the historical behaviour). A
+    # higher value keeps the stored token in use and retried across that many
+    # failures — each separated by the failure backoff (~10 min) — so a
+    # one-off / transient invalid_grant does not force a re-login. It cannot
+    # revive a genuinely revoked token; it only stops giving up early.
+    dead_token_strikes: int = 1
 
 
 @dataclass(frozen=True)
@@ -144,6 +152,10 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         SettingSpec(
             "autoswitch", "model", "model", "string",
             help="Also switch on these models' weekly limits (e.g. Fable, Fable,Opus, or all)",
+        ),
+        SettingSpec(
+            "autoswitch", "deadTokenStrikes", "dead_token_strikes", "int", 1, 10,
+            help="invalid_grant answers before a slot is marked re-login-needed (1 = first; higher keeps retrying the stored token)",
         ),
         SettingSpec(
             "ui", "theme", "theme", "choice", choices=("dark", "light", "auto"),

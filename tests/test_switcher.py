@@ -158,6 +158,35 @@ class TestPlatformDetection:
         assert Platform.detect() == Platform.UNKNOWN
 
 
+class TestDeadTokenStrikesWiring:
+    """The switcher puts autoswitch.deadTokenStrikes in force so the
+    usage-store verdict readers honour it (they have no settings handle)."""
+
+    def test_construction_applies_the_configured_buffer(self, temp_home: Path):
+        from claude_swap import usage_store
+        from claude_swap.settings import settings_path
+
+        settings_path(get_backup_root()).parent.mkdir(parents=True, exist_ok=True)
+        settings_path(get_backup_root()).write_text(
+            json.dumps({"autoswitch": {"deadTokenStrikes": 4}})
+        )
+        ClaudeAccountSwitcher()
+        assert usage_store.effective_dead_token_strikes() == 4
+
+    def test_poll_policy_reload_reapplies_a_live_change(self, temp_home: Path):
+        from claude_swap import usage_store
+        from claude_swap.settings import settings_path
+
+        sw = ClaudeAccountSwitcher()
+        sw._setup_directories()
+        assert usage_store.effective_dead_token_strikes() == 1  # no file yet
+        settings_path(sw.backup_dir).write_text(
+            json.dumps({"autoswitch": {"deadTokenStrikes": 5}})
+        )
+        sw._poll_policy_inputs()  # the per-pass settings chokepoint
+        assert usage_store.effective_dead_token_strikes() == 5
+
+
 class TestJsonOperations:
     """Test JSON read/write operations."""
 

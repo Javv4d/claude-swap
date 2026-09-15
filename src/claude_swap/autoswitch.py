@@ -54,7 +54,11 @@ from claude_swap.poll_policy import (
 from claude_swap.rules import AccountRule, cap_headroom, effective_threshold
 from claude_swap.settings import AutoSwitchSettings, atomic_write_json, parse_model_names
 from claude_swap.switcher import ClaudeAccountSwitcher
-from claude_swap.usage_store import due_candidate, plan_oversleeps_interval
+from claude_swap.usage_store import (
+    due_candidate,
+    plan_oversleeps_interval,
+    set_dead_token_strikes,
+)
 
 STATE_FILENAME = "autoswitch_state.json"
 STATE_SCHEMA_VERSION = 1
@@ -680,6 +684,10 @@ class AutoSwitchEngine:
         # models the engine decides with (CLI overrides included), not on
         # whatever the settings file happens to say.
         switcher.set_poll_policy_inputs(settings.threshold, self._models)
+        # The engine pins poll inputs, which bypasses the switcher's settings
+        # reload; apply the configured dead-token buffer here so due_candidate
+        # (which gates fetch eligibility on it) honours it too.
+        set_dead_token_strikes(settings.dead_token_strikes)
         self.on_event = on_event
         self.dry_run = dry_run
         self.state_path = state_path or (switcher.backup_dir / STATE_FILENAME)

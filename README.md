@@ -209,6 +209,23 @@ cswap add
 
 This will update the stored credentials without creating a duplicate.
 
+**Don't give up on the first failure.** When cswap's usage poll refreshes an
+inactive account's token and the server answers `invalid_grant`, that account
+is normally marked *re-login needed* right away. If you'd rather cswap keep the
+stored token in use and retry a few times first — useful when the same account
+is shared across machines and an occasional token rotation on one machine can
+momentarily reject the other's copy — raise the strike buffer:
+
+```bash
+cswap config set autoswitch.deadTokenStrikes 3   # tolerate 3 invalid_grants, ~20 min, before re-login
+```
+
+Each retry is spaced by the failure backoff (~10 min). This can't revive a
+token the server has genuinely revoked (a real logout, or a rotation that moved
+the live token to another machine) — the stored access token still expires in a
+few hours — so a truly dead lineage still ends at *re-login needed*; the buffer
+only stops premature give-up on a transient or one-off rejection. Default `1`.
+
 ### Other commands
 
 ```bash

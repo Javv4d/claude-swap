@@ -66,6 +66,7 @@ class TestLoadSettings:
                 "intervalSeconds": 1,
                 "hysteresisPct": -5,
                 "unhealthyTicks": 0,
+                "deadTokenStrikes": 99,
             }
         }))
         loaded = load_settings(tmp_path)
@@ -73,6 +74,7 @@ class TestLoadSettings:
         assert loaded.interval_seconds == 15.0  # usage-cache TTL floor
         assert loaded.hysteresis_pct == 0.0
         assert loaded.unhealthy_ticks == 1
+        assert loaded.dead_token_strikes == 10  # clamped to the [1, 10] range
 
     def test_bad_types_fall_back_to_defaults(self, tmp_path: Path):
         settings_path(tmp_path).write_text(json.dumps({
@@ -93,6 +95,19 @@ class TestLoadSettings:
             json.dumps({"autoswitch": {"strategy": "consume-first"}})
         )
         assert load_settings(tmp_path).strategy == "consume-first"
+
+    def test_dead_token_strikes_default_is_one(self, tmp_path: Path):
+        assert load_settings(tmp_path).dead_token_strikes == 1
+
+    def test_dead_token_strikes_parses_and_floors_at_one(self, tmp_path: Path):
+        settings_path(tmp_path).write_text(
+            json.dumps({"autoswitch": {"deadTokenStrikes": 3}})
+        )
+        assert load_settings(tmp_path).dead_token_strikes == 3
+        settings_path(tmp_path).write_text(
+            json.dumps({"autoswitch": {"deadTokenStrikes": 0}})
+        )
+        assert load_settings(tmp_path).dead_token_strikes == 1
 
     def test_set_strategy_consume_first(self, tmp_path: Path):
         set_setting(tmp_path, "autoswitch.strategy", "consume-first")
